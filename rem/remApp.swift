@@ -712,8 +712,10 @@ struct remApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // Empty scene, as we are controlling everything through the AppDelegate
-        Settings { SettingsView(settingsManager: appDelegate.settingsManager) }
+        // Empty scene - settings are opened via menu bar
+        Settings {
+            EmptyView()
+        }
     }
 }
 
@@ -902,21 +904,7 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                 button.action = #selector(self.togglePopover(_:))
             }
             let menu = NSMenu()
-            let recordingTitle = self.isCapturing == .recording ? "Stop Remembering" : "Start Remembering"
-            let recordingSelector = self.isCapturing == .recording ? #selector(self.userDisableRecording) : #selector(self.enableRecording)
-            menu.addItem(NSMenuItem(title: recordingTitle, action: recordingSelector, keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Toggle Timeline", action: #selector(self.toggleTimeline), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Search", action: #selector(self.showSearchView), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "Copy Recent Context", action: #selector(self.copyRecentContext), keyEquivalent: ""))
-            menu.addItem(NSMenuItem.separator()) // Separator
-            menu.addItem(NSMenuItem(title: "Show Me My Data", action: #selector(self.showMeMyData), keyEquivalent: ""))
-            menu.addItem(NSMenuItem(title: "⚠️ Purge All Data ⚠️", action: #selector(self.confirmPurgeAllData), keyEquivalent: ""))
-            menu.addItem(NSMenuItem.separator()) // Separator
-            menu.addItem(
-                withTitle: "Settings",
-                action: #selector(self.openSettings),
-                keyEquivalent: ","
-            )
+            menu.addItem(withTitle: "Settings", action: #selector(self.openSettings), keyEquivalent: ",")
             menu.addItem(NSMenuItem(title: "Quit", action: #selector(self.quitApp), keyEquivalent: "q"))
             self.statusBarItem.menu = menu
         }
@@ -938,10 +926,30 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     }
     
     @objc func openSettings() {
+        // Update recording state before showing settings
+        settingsManager.updateRecordingState(isCapturing == .recording)
+
         if settingsViewWindow == nil {
-            let settingsView = SettingsView(settingsManager: settingsManager)
+            let settingsView = SettingsView(
+                settingsManager: settingsManager,
+                onToggleRecording: { [weak self] in
+                    guard let self = self else { return }
+                    if self.isCapturing == .recording {
+                        self.userDisableRecording()
+                    } else {
+                        self.enableRecording()
+                    }
+                    self.settingsManager.updateRecordingState(self.isCapturing == .recording)
+                },
+                onShowData: { [weak self] in
+                    self?.showMeMyData()
+                },
+                onPurgeData: { [weak self] in
+                    self?.forgetEverything()
+                }
+            )
             settingsViewWindow = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 420),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
@@ -951,12 +959,32 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
             settingsViewWindow?.contentView = NSHostingView(rootView: settingsView)
             settingsViewWindow?.makeKeyAndOrderFront(nil)
             DispatchQueue.main.async {
-                self.settingsViewWindow?.orderFrontRegardless() // Ensure it comes to the front
+                self.settingsViewWindow?.orderFrontRegardless()
             }
-        } else if !(settingsViewWindow?.isVisible ?? false) {
+        } else {
+            // Update the content view with fresh state
+            let settingsView = SettingsView(
+                settingsManager: settingsManager,
+                onToggleRecording: { [weak self] in
+                    guard let self = self else { return }
+                    if self.isCapturing == .recording {
+                        self.userDisableRecording()
+                    } else {
+                        self.enableRecording()
+                    }
+                    self.settingsManager.updateRecordingState(self.isCapturing == .recording)
+                },
+                onShowData: { [weak self] in
+                    self?.showMeMyData()
+                },
+                onPurgeData: { [weak self] in
+                    self?.forgetEverything()
+                }
+            )
+            settingsViewWindow?.contentView = NSHostingView(rootView: settingsView)
             settingsViewWindow?.makeKeyAndOrderFront(nil)
             DispatchQueue.main.async {
-                self.settingsViewWindow?.orderFrontRegardless() // Ensure it comes to the front
+                self.settingsViewWindow?.orderFrontRegardless()
             }
         }
     }

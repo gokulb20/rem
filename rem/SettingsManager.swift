@@ -22,6 +22,7 @@ struct AppSettings: Codable {
 // The settings manager handles saving and loading the settings
 class SettingsManager: ObservableObject {
     @Published var settings: AppSettings
+    @Published var isRecording: Bool = false
 
     private let settingsKey = "appSettings"
 
@@ -41,35 +42,122 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(encoded, forKey: settingsKey)
         }
     }
+
+    func updateRecordingState(_ recording: Bool) {
+        DispatchQueue.main.async {
+            self.isRecording = recording
+        }
+    }
 }
 
 struct SettingsView: View {
     @ObservedObject var settingsManager: SettingsManager
+    var onToggleRecording: () -> Void
+    var onShowData: () -> Void
+    var onPurgeData: () -> Void
+
+    @State private var showPurgeConfirmation = false
 
     var body: some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .leading, spacing: 20) {
             Text("Settings")
                 .font(.title)
-                .padding(.bottom)
-            Form {
-                Toggle("Launch rem on system startup", isOn: $settingsManager.settings.startRememberingOnStartup)
-                    .onChange(of: settingsManager.settings.startRememberingOnStartup) { value in
-                        LaunchAtLogin.isEnabled = value
-                        settingsManager.saveSettings()
+                .fontWeight(.semibold)
+
+            // RECORDING SECTION
+            VStack(alignment: .leading, spacing: 12) {
+                Text("RECORDING")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fontWeight(.medium)
+
+                HStack {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(settingsManager.isRecording ? Color.green : Color.gray)
+                            .frame(width: 10, height: 10)
+                        Text(settingsManager.isRecording ? "Recording" : "Stopped")
+                            .font(.body)
                     }
-                Toggle("Remember everything copied to clipboard", isOn: $settingsManager.settings.saveEverythingCopiedToClipboard)
-                    .onChange(of: settingsManager.settings.saveEverythingCopiedToClipboard) { _ in settingsManager.saveSettings() }
-                Toggle("Allow opening / closing timeline with CMD + Scroll", isOn: $settingsManager.settings.enableCmdScrollShortcut)
-                    .onChange(of: settingsManager.settings.enableCmdScrollShortcut) { _ in settingsManager.saveSettings() }
-                Toggle("Only OCR region of active application window (more efficient)", isOn: $settingsManager.settings.onlyOCRFrontmostWindow)
-                    .onChange(of: settingsManager.settings.onlyOCRFrontmostWindow) { _ in settingsManager.saveSettings() }
-                Toggle("Use faster, but lower accuracy OCR (more efficient)", isOn: $settingsManager.settings.fastOCR)
-                    .onChange(of: settingsManager.settings.fastOCR) { _ in settingsManager.saveSettings() }
-                Toggle("Always record window with mouse", isOn: $settingsManager.settings.recordWindowWithMouse)
-                    .onChange(of: settingsManager.settings.recordWindowWithMouse) { _ in settingsManager.saveSettings() }
+
+                    Spacer()
+
+                    Button(action: onToggleRecording) {
+                        Text(settingsManager.isRecording ? "Stop" : "Start")
+                            .frame(width: 60)
+                    }
+                    .controlSize(.regular)
+                }
+                .padding(12)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
             }
+
+            // OPTIONS SECTION
+            VStack(alignment: .leading, spacing: 12) {
+                Text("OPTIONS")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fontWeight(.medium)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Launch at startup", isOn: $settingsManager.settings.startRememberingOnStartup)
+                        .onChange(of: settingsManager.settings.startRememberingOnStartup) { value in
+                            LaunchAtLogin.isEnabled = value
+                            settingsManager.saveSettings()
+                        }
+
+                    Toggle("Include clipboard text", isOn: $settingsManager.settings.saveEverythingCopiedToClipboard)
+                        .onChange(of: settingsManager.settings.saveEverythingCopiedToClipboard) { _ in
+                            settingsManager.saveSettings()
+                        }
+
+                    Toggle("Fast OCR mode", isOn: $settingsManager.settings.fastOCR)
+                        .onChange(of: settingsManager.settings.fastOCR) { _ in
+                            settingsManager.saveSettings()
+                        }
+
+                    Toggle("OCR active window only", isOn: $settingsManager.settings.onlyOCRFrontmostWindow)
+                        .onChange(of: settingsManager.settings.onlyOCRFrontmostWindow) { _ in
+                            settingsManager.saveSettings()
+                        }
+                }
+            }
+
+            // DATA SECTION
+            VStack(alignment: .leading, spacing: 12) {
+                Text("DATA")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fontWeight(.medium)
+
+                HStack(spacing: 12) {
+                    Button(action: onShowData) {
+                        Text("Show Data Folder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.regular)
+
+                    Button(action: { showPurgeConfirmation = true }) {
+                        Text("Purge All Data")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .controlSize(.regular)
+                    .foregroundColor(.red)
+                }
+            }
+
+            Spacer()
         }
-        .padding()
+        .padding(20)
+        .frame(width: 350, height: 380)
+        .alert("Purge All Data?", isPresented: $showPurgeConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete Everything", role: .destructive) {
+                onPurgeData()
+            }
+        } message: {
+            Text("This will permanently delete all captured data. This action cannot be undone.")
+        }
     }
 }
-
