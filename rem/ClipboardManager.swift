@@ -13,25 +13,20 @@ class ClipboardManager {
     
     func getClipboardIfChanged() -> String? {
         // Check if the clipboard has changed since the last check
+        // Note: NSPasteboard.changeCount only tells us IF it changed, not how many times.
+        // The pasteboard API doesn't provide access to historical clipboard items -
+        // it only returns the current content.
         if pasteboard.changeCount != changeCount {
-            var newItems: [String] = []
-            let currentChangeCount = pasteboard.changeCount
-            
-            // Iterate over the changes since the last recorded changeCount
-            for _ in changeCount..<currentChangeCount {
-                if let string = pasteboard.string(forType: .string) {
-                    newItems.append(string)
-                }
-            }
-            
             // Update the changeCount to the current changeCount
-            changeCount = currentChangeCount
-            
-            // Return the concatenated string if there are new items
-            return newItems.isEmpty ? nil : newItems.joined(separator: "\n")
+            changeCount = pasteboard.changeCount
+
+            // Return the current clipboard content if it's a string
+            if let string = pasteboard.string(forType: .string), !string.isEmpty {
+                return string
+            }
         }
-        
-        // Return nil if there are no new changes
+
+        // Return nil if there are no new changes or no string content
         return nil
     }
     

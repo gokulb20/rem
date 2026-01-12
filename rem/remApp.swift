@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import CryptoKit
 
 // MARK: - Data Exporter for Claude Access
 
@@ -71,8 +72,8 @@ class DataExporter {
     private var dailyUrls: [String: Int] = [:]   // url -> visit count
     private var lastDigestDate: String = ""
 
-    // Deduplication
-    private var lastOcrHash: Int = 0
+    // Deduplication - using deterministic hash (not Swift's hashValue which changes per session)
+    private var lastOcrHash: String = ""
     private var lastApp: String = ""
     private var lastWindowTitle: String = ""
     private var duplicateSkipCount: Int = 0
@@ -94,51 +95,29 @@ class DataExporter {
     private var dailyUrlVisits: [String: (title: String?, firstSeen: String, count: Int)] = [:]
     private var dailyKeyMoments: [String] = []
 
+    // Thread synchronization for hourly/daily data
+    private let dataLock = NSLock()
+
     // Retention settings
     let videoRetentionHours: Int = 1
+
+    // AppleScript cache - compiled scripts are expensive (50-200ms each)
+    private var windowTitleScripts: [String: NSAppleScript] = [:]
+    private var browserUrlScripts: [String: NSAppleScript] = [:]
+    private let scriptCacheLock = NSLock()
 
     init() {
         let homeDir = fileManager.homeDirectoryForCurrentUser
         exportBaseDir = homeDir.appendingPathComponent("rem-data")
         try? fileManager.createDirectory(at: exportBaseDir, withIntermediateDirectories: true)
+
+        // Pre-compile common browser URL scripts
+        precompileBrowserScripts()
     }
 
-    // MARK: - Window Title Extraction
-
-    func getWindowTitle(for appName: String?) -> String? {
-        guard let app = appName else { return nil }
-
-        let script = """
-        tell application "System Events"
-            tell process "\(app)"
-                try
-                    return name of front window
-                on error
-                    return ""
-                end try
-            end tell
-        end tell
-        """
-
-        var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: script) {
-            let output = scriptObject.executeAndReturnError(&error)
-            if error == nil, let title = output.stringValue, !title.isEmpty {
-                return title
-            }
-        }
-        return nil
-    }
-
-    // MARK: - Browser URL Extraction
-
-    func getBrowserURL(for appName: String?) -> String? {
-        guard let app = appName else { return nil }
-
-        var script: String?
-
-        if app == "Safari" {
-            script = """
+    private func precompileBrowserScripts() {
+        let scripts: [(String, String)] = [
+            ("Safari", """
             tell application "Safari"
                 try
                     return URL of current tab of front window
@@ -146,9 +125,8 @@ class DataExporter {
                     return ""
                 end try
             end tell
-            """
-        } else if app == "Google Chrome" || app == "Chrome" {
-            script = """
+            """),
+            ("Google Chrome", """
             tell application "Google Chrome"
                 try
                     return URL of active tab of front window
@@ -156,9 +134,8 @@ class DataExporter {
                     return ""
                 end try
             end tell
-            """
-        } else if app == "Arc" {
-            script = """
+            """),
+            ("Arc", """
             tell application "Arc"
                 try
                     return URL of active tab of front window
@@ -166,20 +143,77 @@ class DataExporter {
                     return ""
                 end try
             end tell
+            """)
+        ]
+
+        for (app, source) in scripts {
+            if let script = NSAppleScript(source: source) {
+                browserUrlScripts[app] = script
+            }
+        }
+    }
+
+    // MARK: - Window Title Extraction (with caching)
+
+    func getWindowTitle(for appName: String?) -> String? {
+        guard let app = appName else { return nil }
+
+        scriptCacheLock.lock()
+        var cachedScript = windowTitleScripts[app]
+        scriptCacheLock.unlock()
+
+        // Compile and cache script if not already cached
+        if cachedScript == nil {
+            let source = """
+            tell application "System Events"
+                tell process "\(app)"
+                    try
+                        return name of front window
+                    on error
+                        return ""
+                    end try
+                end tell
+            end tell
             """
-        } else if app == "Firefox" {
-            // Firefox doesn't support AppleScript well, skip
-            return nil
+            if let newScript = NSAppleScript(source: source) {
+                scriptCacheLock.lock()
+                windowTitleScripts[app] = newScript
+                cachedScript = newScript
+                scriptCacheLock.unlock()
+            }
         }
 
-        guard let scriptSource = script else { return nil }
+        guard let script = cachedScript else { return nil }
 
         var error: NSDictionary?
-        if let scriptObject = NSAppleScript(source: scriptSource) {
-            let output = scriptObject.executeAndReturnError(&error)
-            if error == nil, let url = output.stringValue, !url.isEmpty {
-                return url
-            }
+        let output = script.executeAndReturnError(&error)
+        if error == nil, let title = output.stringValue, !title.isEmpty {
+            return title
+        }
+        return nil
+    }
+
+    // MARK: - Browser URL Extraction (with caching)
+
+    func getBrowserURL(for appName: String?) -> String? {
+        guard let app = appName else { return nil }
+
+        // Firefox doesn't support AppleScript well, skip
+        if app == "Firefox" { return nil }
+
+        // Handle Chrome alias
+        let lookupApp = (app == "Chrome") ? "Google Chrome" : app
+
+        scriptCacheLock.lock()
+        let cachedScript = browserUrlScripts[lookupApp]
+        scriptCacheLock.unlock()
+
+        guard let script = cachedScript else { return nil }
+
+        var error: NSDictionary?
+        let output = script.executeAndReturnError(&error)
+        if error == nil, let url = output.stringValue, !url.isEmpty {
+            return url
         }
         return nil
     }
@@ -187,7 +221,8 @@ class DataExporter {
     // MARK: - Deduplication & Cleaning
 
     private func isDuplicate(ocrText: String, appName: String?) -> Bool {
-        let hash = ocrText.hashValue
+        // Use SHA256 for deterministic hash (Swift's hashValue changes per session)
+        let hash = SHA256.hash(data: Data(ocrText.utf8)).description
         let app = appName ?? "Unknown"
 
         // Same app and same content = duplicate
@@ -259,30 +294,51 @@ class DataExporter {
 
         lastCaptureTime = timestamp
 
-        let duration = Int(timestamp.timeIntervalSince(currentSession!.startTime))
-        return (currentSession!.id, duration)
+        // Safe unwrap - guaranteed to exist after the above logic
+        guard let session = currentSession else {
+            return ("unknown-session", 0)
+        }
+        let duration = Int(timestamp.timeIntervalSince(session.startTime))
+        return (session.id, duration)
     }
 
     // MARK: - Activity Tracking for Perfect Recall
 
     private func trackActivity(app: String, windowTitle: String?, url: String?, ocrText: String, timestamp: Date) {
+        dataLock.lock()
+        defer { dataLock.unlock() }
+
         let hour = Calendar.current.component(.hour, from: timestamp)
         let timeFormatter = DateFormatter()
         timeFormatter.dateFormat = "HH:mm"
         let timeStr = timeFormatter.string(from: timestamp)
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let dateStr = dateFormatter.string(from: timestamp)
-
-        // New hour? Generate summary for previous hour
+        // New hour? Snapshot and generate summary for previous hour
         if lastHour != -1 && hour != lastHour {
-            generateHourlySummary(hour: lastHour, date: timestamp)
-            // Reset hourly tracking
+            // CRITICAL: Snapshot data BEFORE clearing to prevent race condition
+            let snapshotTimeline = hourlyTimeline
+            let snapshotUrls = hourlyUrls
+            let snapshotStats = hourlyStats
+            let snapshotTopics = hourlyTopics
+            let previousHour = lastHour
+
+            // Reset hourly tracking immediately
             hourlyTimeline.removeAll()
             hourlyUrls.removeAll()
             hourlyStats.removeAll()
             hourlyTopics.removeAll()
+
+            // Generate summary async with snapshot data (doesn't block captures)
+            DispatchQueue.global(qos: .background).async { [weak self] in
+                self?.generateHourlySummaryFromSnapshot(
+                    hour: previousHour,
+                    date: timestamp,
+                    timeline: snapshotTimeline,
+                    urls: snapshotUrls,
+                    stats: snapshotStats,
+                    topics: snapshotTopics
+                )
+            }
         }
         lastHour = hour
 
@@ -329,7 +385,7 @@ class DataExporter {
             }
         }
 
-        // Track time per app
+        // Track time per app (2 seconds per capture)
         hourlyStats[app, default: 0] += 2
 
         // Track topics
@@ -374,20 +430,37 @@ class DataExporter {
         return content
     }
 
-    private func generateHourlySummary(hour: Int, date: Date) {
+    // MARK: - Summary Generation (Thread-Safe)
+
+    private func generateHourlySummaryFromSnapshot(
+        hour: Int,
+        date: Date,
+        timeline: [ActivityEntry],
+        urls: Set<String>,
+        stats: [String: Int],
+        topics: Set<String>
+    ) {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         let dayFolder = formatter.string(from: date)
         let dayDir = exportBaseDir.appendingPathComponent(dayFolder)
+        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
 
         let hourStr = String(format: "%02d:00", hour)
+
+        // Fix integer division: ensure at least 1 minute if any time was recorded
+        let appsUsedMinutes = stats.mapValues { seconds in
+            let minutes = seconds / 60
+            return minutes > 0 ? minutes : (seconds > 0 ? 1 : 0)
+        }
+
         let summary = HourlySummary(
             hour: hourStr,
             date: dayFolder,
-            timeline: hourlyTimeline,
-            urlsVisited: Array(hourlyUrls),
-            appsUsed: hourlyStats.mapValues { $0 / 60 },
-            keyTopics: Array(hourlyTopics.prefix(30))
+            timeline: timeline,
+            urlsVisited: Array(urls),
+            appsUsed: appsUsedMinutes,
+            keyTopics: Array(topics.prefix(30))
         )
 
         let filename = "hour-\(String(format: "%02d", hour))-summary.json"
@@ -400,20 +473,53 @@ class DataExporter {
         }
     }
 
+    private func generateHourlySummary(hour: Int, date: Date) {
+        // Use current data (called when not using snapshot approach)
+        generateHourlySummaryFromSnapshot(
+            hour: hour,
+            date: date,
+            timeline: hourlyTimeline,
+            urls: hourlyUrls,
+            stats: hourlyStats,
+            topics: hourlyTopics
+        )
+    }
+
     private func generateDailyJournal(for date: String) {
+        dataLock.lock()
+        // Snapshot daily data to prevent race condition
+        let snapshotTimeline = dailyTimeline
+        let snapshotUrlVisits = dailyUrlVisits
+        let snapshotKeyMoments = dailyKeyMoments
+        let snapshotStats = dailyStats
+
+        // Reset daily tracking immediately
+        dailyTimeline.removeAll()
+        dailyUrlVisits.removeAll()
+        dailyKeyMoments.removeAll()
+        dataLock.unlock()
+
         let dayDir = exportBaseDir.appendingPathComponent(date)
+        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
 
         // Convert URL visits to array
-        let urlVisits = dailyUrlVisits.map { (url, info) in
+        let urlVisits = snapshotUrlVisits.map { (url, info) in
             URLVisit(url: url, title: info.title, firstSeen: info.firstSeen, visitCount: info.count)
         }.sorted { $0.visitCount > $1.visitCount }
 
+        // Fix integer division: captures * 2 / 60 → ensure at least 1 minute
+        let appSummaryMinutes = snapshotStats.mapValues { captures in
+            let seconds = captures * 2
+            let minutes = seconds / 60
+            return minutes > 0 ? minutes : (seconds > 0 ? 1 : 0)
+        }
+
         let journal = DailyJournal(
             date: date,
-            timeline: dailyTimeline,
+            timeline: snapshotTimeline,
             allUrls: urlVisits,
-            appSummary: dailyStats.mapValues { $0 * 2 / 60 },  // Convert to minutes
-            keyMoments: dailyKeyMoments
+            appSummary: appSummaryMinutes,
+            keyMoments: snapshotKeyMoments
         )
 
         let filename = "\(date)-journal.json"
@@ -424,11 +530,6 @@ class DataExporter {
         if let data = try? encoder.encode(journal) {
             try? data.write(to: filePath)
         }
-
-        // Reset daily tracking
-        dailyTimeline.removeAll()
-        dailyUrlVisits.removeAll()
-        dailyKeyMoments.removeAll()
     }
 
     // MARK: - Export to JSON
@@ -678,6 +779,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         targetHeight: Int(NSScreen.main!.frame.height * NSScreen.main!.backingScaleFactor)
     )
 
+    // Event monitors - stored so we can remove them later to prevent memory leaks
+    private var globalScrollMonitor: Any?
+    private var globalKeyMonitor: Any?
+    private var localKeyMonitor: Any?
+    private var localScrollMonitor: Any?
+
+    // Screenshot scheduling - track work item for proper cancellation
+    private var screenshotWorkItem: DispatchWorkItem?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let _ = DatabaseManager.shared
 
@@ -693,39 +803,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup Menu
         setupMenu()
         
-        // Monitor for scroll events
-        NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+        // Monitor for scroll events - store reference for cleanup
+        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             self?.handleGlobalScrollEvent(event)
         }
-        
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if (self?.searchViewWindow?.isVisible ?? false) && event.keyCode == 53 {
                 DispatchQueue.main.async { [weak self] in
                     self?.closeSearchView()
                 }
             }
-            
+
             if (self?.isTimelineOpen() ?? false) && event.keyCode == 53 {
                 DispatchQueue.main.async { [weak self] in
                     self?.closeTimelineView()
                 }
             }
         }
-        
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.modifierFlags.contains([.command, .shift]) && event.keyCode == 3 {
                 DispatchQueue.main.async { [weak self] in
                     self?.closeTimelineView()
                     self?.showSearchView()
                 }
             }
-            
+
             if (self?.searchViewWindow?.isVisible ?? false) && event.keyCode == 53 {
                 DispatchQueue.main.async { [weak self] in
                     self?.closeSearchView()
                 }
             }
-            
+
             if (self?.isTimelineOpen() ?? false) && event.keyCode == 53 {
                 DispatchQueue.main.async { [weak self] in
                     self?.closeTimelineView()
@@ -733,8 +843,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
-        
-        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+
+        localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             if self?.isTimelineOpen() ?? false {
                 if !event.modifierFlags.contains(.command) && event.scrollingDeltaX != 0 {
                     self?.timelineView?.viewModel.updateIndex(withDelta: event.scrollingDeltaX)
@@ -1048,8 +1158,14 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
             }
             
             screenCaptureRetries = 0
-            screenshotQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+
+            // Use cancellable work item for proper cleanup when stopping
+            screenshotWorkItem?.cancel()
+            screenshotWorkItem = DispatchWorkItem { [weak self] in
                 self?.scheduleScreenshot(shareableContent: shareableContent)
+            }
+            if let workItem = screenshotWorkItem {
+                screenshotQueue.asyncAfter(deadline: .now() + 2, execute: workItem)
             }
         }
     }
@@ -1076,6 +1192,9 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     
     func stopScreenCapture() {
         isCapturing = .stopped
+        // Cancel any pending screenshot work to stop the recursive loop
+        screenshotWorkItem?.cancel()
+        screenshotWorkItem = nil
         logger.info("Screen capture stopped")
     }
     
@@ -1097,7 +1216,15 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     private func processScreenshot(frameId: Int64, imageData: Data, frame: CGRect) async {
         imageBufferQueue.async(flags: .barrier) { [weak self] in
             guard let strongSelf = self else { return }
-            
+
+            // CRITICAL: Add buffer limit to prevent unbounded memory growth
+            // Each frame is ~5MB, so 100 frames = ~500MB max buffer
+            let maxBufferSize = 100
+            if strongSelf.imageDataBuffer.count >= maxBufferSize {
+                strongSelf.logger.warning("Image buffer full (\(strongSelf.imageDataBuffer.count) frames), dropping oldest frame")
+                strongSelf.imageDataBuffer.removeFirst()
+            }
+
             strongSelf.imageDataBuffer.append(imageData)
 
             // Quickly move the images to a temporary buffer if the threshold is reached
@@ -1163,17 +1290,32 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                 }
             }
 
-            // Close the pipe and handle the process completion
+            // Close the pipe and handle the process completion with timeout
             ffmpegInputPipe.fileHandleForWriting.closeFile()
+
+            // Add timeout to prevent indefinite hang if FFmpeg gets stuck
+            let timeoutSeconds: Double = 30.0
+            var didTimeout = false
+            let timeoutWorkItem = DispatchWorkItem {
+                if ffmpegProcess.isRunning {
+                    self.logger.warning("FFmpeg process timed out after \(timeoutSeconds)s, terminating")
+                    ffmpegProcess.terminate()
+                    didTimeout = true
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: timeoutWorkItem)
             ffmpegProcess.waitUntilExit()
-            
+            timeoutWorkItem.cancel()
+
             // Check if FFmpeg process completed successfully
-            if ffmpegProcess.terminationStatus == 0 {
+            if didTimeout {
+                logger.error("FFmpeg timed out and was terminated")
+            } else if ffmpegProcess.terminationStatus == 0 {
                 // Start new video chunk in database only if FFmpeg succeeds
                 let _ = DatabaseManager.shared.startNewVideoChunk(filePath: outputPath)
                 logger.info("Video successfully saved and registered.")
             } else {
-                logger.error("FFmpeg failed to process video chunk.")
+                logger.error("FFmpeg failed to process video chunk (exit code: \(ffmpegProcess.terminationStatus))")
             }
 
             
@@ -1242,7 +1384,30 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     }
 
     @objc func quitApp() {
+        // Clean up event monitors to prevent memory leaks
+        cleanupEventMonitors()
+        // Cancel any pending screenshot work
+        screenshotWorkItem?.cancel()
         NSApplication.shared.terminate(self)
+    }
+
+    private func cleanupEventMonitors() {
+        if let monitor = globalScrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalScrollMonitor = nil
+        }
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyMonitor = nil
+        }
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyMonitor = nil
+        }
+        if let monitor = localScrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            localScrollMonitor = nil
+        }
     }
 
     private func performOCR(frameId: Int64, on image: CGImage) {

@@ -16,7 +16,8 @@ class DatabaseManager {
     static let shared = DatabaseManager()
     private var db: Connection
     static var FPS: CMTimeScale = 25
-    
+    private var initializationFailed = false
+
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
         category: String(describing: DatabaseManager.self)
@@ -53,15 +54,33 @@ class DatabaseManager {
     private var lastChunksFramesIndex: Int64 = 0
     
     init() {
-        if let savedir = RemFileManager.shared.getSaveDir() {
-            db = try! Connection("\(savedir)/db.sqlite3")
-        } else {
-            db = try! Connection("db.sqlite3")
+        // Try to create database connection with proper error handling
+        do {
+            if let savedir = RemFileManager.shared.getSaveDir() {
+                db = try Connection("\(savedir)/db.sqlite3")
+            } else {
+                db = try Connection("db.sqlite3")
+            }
+        } catch {
+            logger.error("Failed to create database connection: \(error.localizedDescription). Using in-memory fallback.")
+            // Fallback to in-memory database - data won't persist but app won't crash
+            do {
+                db = try Connection(.inMemory)
+            } catch {
+                // This should never fail, but if it does, we need a connection
+                fatalError("Cannot create even in-memory database: \(error)")
+            }
+            initializationFailed = true
         }
-        
-        try! db.run("PRAGMA journal_mode = WAL")
-        try! db.run("PRAGMA synchronous = NORMAL")
-        
+
+        // Configure database pragmas for performance
+        do {
+            try db.run("PRAGMA journal_mode = WAL")
+            try db.run("PRAGMA synchronous = NORMAL")
+        } catch {
+            logger.warning("Failed to set database pragmas: \(error.localizedDescription)")
+        }
+
         createTables()
         currentChunkId = getCurrentChunkId()
         lastFrameId = getLastFrameId()
@@ -87,34 +106,39 @@ class DatabaseManager {
     }
     
     private func createTables() {
-        try! db.run(videoChunks.create(ifNotExists: true) { t in
-            t.column(id, primaryKey: .autoincrement)
-            t.column(filePath)
-        })
-        
-        try! db.run(frames.create(ifNotExists: true) { t in
-            t.column(id, primaryKey: .autoincrement)
-            t.column(chunkId, references: videoChunks, id)
-            t.column(offsetIndex)
-            t.column(timestamp)
-            t.column(activeApplicationName)
-        })
-        
-        try! db.run(uniqueAppNames.create(ifNotExists: true) { t in
-            t.column(id, primaryKey: .autoincrement)
-            t.column(activeApplicationName, unique: true)
-        })
-        
-        try! db.run(framesText.create(ifNotExists: true) { t in
-            t.column(id, primaryKey: .autoincrement)
-            t.column(frameId)
-            t.column(text)
-            t.column(x)
-            t.column(y)
-            t.column(w)
-            t.column(h)
-        })
-        
+        do {
+            try db.run(videoChunks.create(ifNotExists: true) { t in
+                t.column(id, primaryKey: .autoincrement)
+                t.column(filePath)
+            })
+
+            try db.run(frames.create(ifNotExists: true) { t in
+                t.column(id, primaryKey: .autoincrement)
+                t.column(chunkId, references: videoChunks, id)
+                t.column(offsetIndex)
+                t.column(timestamp)
+                t.column(activeApplicationName)
+            })
+
+            try db.run(uniqueAppNames.create(ifNotExists: true) { t in
+                t.column(id, primaryKey: .autoincrement)
+                t.column(activeApplicationName, unique: true)
+            })
+
+            try db.run(framesText.create(ifNotExists: true) { t in
+                t.column(id, primaryKey: .autoincrement)
+                t.column(frameId)
+                t.column(text)
+                t.column(x)
+                t.column(y)
+                t.column(w)
+                t.column(h)
+            })
+        } catch {
+            logger.error("Failed to create core tables: \(error.localizedDescription)")
+            initializationFailed = true
+        }
+
         // Seed the `uniqueAppNames` table if empty
         do {
             if try db.scalar(uniqueAppNames.count) == 0 {
@@ -131,17 +155,22 @@ class DatabaseManager {
                 try db.run(insert)
             }
         } catch {
-            print("Error seeding database with app names: \(error)")
+            logger.warning("Error seeding database with app names: \(error.localizedDescription)")
         }
+
+        // Configure FTS4 for full-text search
         let config = FTS4Config()
             .column(frameId, [.unindexed])
             .column(text)
             .languageId("lid")
             .order(.desc)
-        
-        // Text search
-        try! db.run(allText.create(.FTS4(config), ifNotExists: true))
-        
+
+        do {
+            try db.run(allText.create(.FTS4(config), ifNotExists: true))
+        } catch {
+            logger.error("Failed to create FTS table: \(error.localizedDescription)")
+        }
+
         // Create chunksFramesView (ensures all frames have associated chunks)
         let viewSQL = """
         CREATE VIEW IF NOT EXISTS chunks_frames_view AS
@@ -160,7 +189,11 @@ class DatabaseManager {
         ORDER BY
             vc.id, f.id;
         """
-        try! db.run(viewSQL)
+        do {
+            try db.run(viewSQL)
+        } catch {
+            logger.warning("Failed to create view (may already exist): \(error.localizedDescription)")
+        }
     }
     
     private func createIndices() {
@@ -216,25 +249,35 @@ class DatabaseManager {
     // Insert a new video chunk and return its ID
     func startNewVideoChunk(filePath: String) -> Int64 {
         let insert = videoChunks.insert(self.id <- currentChunkId, self.filePath <- filePath)
-        let id = try! db.run(insert)
-        currentChunkId = id + 1
-        currentFrameOffset = 0
-        lastChunksFramesIndex = getLastChunksFramesIndex()
-        return id
+        do {
+            let id = try db.run(insert)
+            currentChunkId = id + 1
+            currentFrameOffset = 0
+            lastChunksFramesIndex = getLastChunksFramesIndex()
+            return id
+        } catch {
+            logger.error("Failed to start new video chunk: \(error.localizedDescription)")
+            return -1
+        }
     }
     
     func insertFrame(activeApplicationName: String?) -> Int64 {
         let insert = frames.insert(chunkId <- currentChunkId, timestamp <- Date(), offsetIndex <- currentFrameOffset, self.activeApplicationName <- activeApplicationName)
-        let id = try! db.run(insert)
-        currentFrameOffset += 1
-        lastFrameId = id
-        
-        if let appName = activeApplicationName {
-            //will check if the app name is already in the database.
-            insertUniqueApplicationNamesIfNeeded(appName)
+        do {
+            let id = try db.run(insert)
+            currentFrameOffset += 1
+            lastFrameId = id
+
+            if let appName = activeApplicationName {
+                // Will check if the app name is already in the database
+                insertUniqueApplicationNamesIfNeeded(appName)
+            }
+
+            return id
+        } catch {
+            logger.error("Failed to insert frame: \(error.localizedDescription)")
+            return -1
         }
-        
-        return id
     }
     
     private func insertUniqueApplicationNamesIfNeeded(_ appName: String) {
@@ -259,31 +302,43 @@ class DatabaseManager {
         }
     }
     
-    func insertTextForFrame(frameId: Int64, text: String, x: Double, y: Double, w: Double, h: Double){
+    func insertTextForFrame(frameId: Int64, text: String, x: Double, y: Double, w: Double, h: Double) {
         let insert = framesText.insert(self.frameId <- frameId, self.text <- text, self.x <- x, self.y <- y,
                                        self.w <- w, self.h <- h)
-        try! db.run(insert)
+        do {
+            try db.run(insert)
+        } catch {
+            logger.error("Failed to insert text for frame \(frameId): \(error.localizedDescription)")
+        }
     }
     
-    func insertTextsForFrames(entries: [(frameId: Int64, text: String, x: Double, y: Double, w: Double, h: Double)]){
-        try! db.transaction {
-            for entry in entries {
-                let insert = framesText.insert(
-                    self.frameId <- entry.frameId,
-                    self.text <- entry.text,
-                    self.x <- entry.x,
-                    self.y <- entry.y,
-                    self.w <- entry.w,
-                    self.h <- entry.h
-                )
-                try db.run(insert)
+    func insertTextsForFrames(entries: [(frameId: Int64, text: String, x: Double, y: Double, w: Double, h: Double)]) {
+        do {
+            try db.transaction {
+                for entry in entries {
+                    let insert = framesText.insert(
+                        self.frameId <- entry.frameId,
+                        self.text <- entry.text,
+                        self.x <- entry.x,
+                        self.y <- entry.y,
+                        self.w <- entry.w,
+                        self.h <- entry.h
+                    )
+                    try db.run(insert)
+                }
             }
+        } catch {
+            logger.error("Failed to insert texts for frames: \(error.localizedDescription)")
         }
     }
     
     func insertAllTextForFrame(frameId: Int64, text: String) {
         let insert = allText.insert(self.frameId <- frameId, self.text <- text)
-        try! db.run(insert)
+        do {
+            try db.run(insert)
+        } catch {
+            logger.error("Failed to insert all text for frame \(frameId): \(error.localizedDescription)")
+        }
     }
     
     func getFrame(forIndex index: Int64) -> (offsetIndex: Int64, filePath: String)? {
@@ -418,8 +473,15 @@ class DatabaseManager {
             partialQuery = partialQuery.join(uniqueAppNames, on: uniqueAppNames[activeApplicationName] == frames[activeApplicationName])
         }
 
+        // Sanitize search text to prevent FTS injection
+        let sanitizedSearch = searchText
+            .replacingOccurrences(of: "*", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         var query = partialQuery
-                     .filter(text.match("*\(searchText)*"))
+                     .filter(text.match("*\(sanitizedSearch)*"))
 
         if !appName.isEmpty && searchText.isEmpty {
             query = partialQuery

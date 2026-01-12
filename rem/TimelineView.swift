@@ -171,11 +171,26 @@ class CustomHostingViewController: NSViewController {
     var customHostingView: CustomHostingView?
     var interceptingView: CustomInterceptingView?
     var hadImage: Bool = false
-    
+
     override func viewWillAppear() {
         DispatchQueue.main.async {
             self.view.window?.makeKey()
         }
+    }
+
+    // CRITICAL: Clean up views to prevent memory leaks
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        // Remove subviews and nil out references to break retain cycles
+        customHostingView?.removeFromSuperview()
+        customHostingView = nil
+    }
+
+    deinit {
+        // Ensure cleanup even if viewWillDisappear wasn't called
+        customHostingView?.removeFromSuperview()
+        customHostingView = nil
+        interceptingView = nil
     }
 
     override func loadView() {
