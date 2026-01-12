@@ -79,9 +79,31 @@ Rem stores data in two locations:
    - `output-*.mp4` - Video chunks (automatically cleaned after 1 hour)
 
 2. **Exports for Claude/AI**: `~/rem-data/`
-   - Daily folders with JSON captures
-   - Hourly and daily summaries
-   - Perfect for AI assistant integration
+   - Daily folders organized as `YYYY-MM-DD/`
+   - Individual captures as `.md` files with YAML frontmatter
+   - Hourly summaries (`hour-XX-summary.json`) and daily journals
+   - Perfect for AI assistant integration via filesystem connector
+
+### Export Format
+
+Individual captures are exported as Markdown with YAML frontmatter:
+
+```markdown
+---
+timestamp: 2026-01-12T02:35:04Z
+app: Safari
+frame_id: 632
+window_title: "YouTube - Home"
+url: https://youtube.com
+session_id: Safari-0235
+session_duration: 180
+---
+
+youtube.com
+...OCR text content here...
+```
+
+Summaries remain as JSON for structured aggregation.
 
 ## Architecture
 

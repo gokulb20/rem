@@ -1175,7 +1175,7 @@ class DataExporter {
         }
     }
 
-    // MARK: - Export to JSON
+    // MARK: - Export to Markdown
 
     func exportCapture(timestamp: Date, appName: String?, ocrText: String, frameId: Int64) {
         // Clean the OCR text first
@@ -1215,33 +1215,49 @@ class DataExporter {
         // Track activity for perfect recall summaries
         trackActivity(app: app, windowTitle: windowTitle, url: url, ocrText: cleanedText, timestamp: timestamp)
 
-        // Create structured capture data
-        let capture = CaptureData(
-            timestamp: timestamp.ISO8601Format(),
-            app: app,
-            windowTitle: windowTitle,
-            url: url,
-            ocrText: cleanedText,  // Use cleaned text
-            frameId: frameId,
-            sessionId: sessionId,
-            sessionDuration: sessionDuration
-        )
-
-        // Save as JSON
+        // Build markdown with YAML frontmatter
         let safeAppName = app
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
             .prefix(30)
 
-        let filename = "\(timeString)_\(safeAppName).json"
+        let filename = "\(timeString)_\(safeAppName).md"
         let filePath = dayDir.appendingPathComponent(filename)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        // Build YAML frontmatter
+        var frontmatter = """
+            ---
+            timestamp: \(timestamp.ISO8601Format())
+            app: \(app)
+            frame_id: \(frameId)
+            """
+
+        // Add optional fields
+        if let windowTitle = windowTitle, !windowTitle.isEmpty {
+            // Escape quotes in window title for YAML
+            let escapedTitle = windowTitle.replacingOccurrences(of: "\"", with: "\\\"")
+            frontmatter += "\nwindow_title: \"\(escapedTitle)\""
+        }
+
+        if let url = url, !url.isEmpty {
+            frontmatter += "\nurl: \(url)"
+        }
+
+        if let sessionId = sessionId {
+            frontmatter += "\nsession_id: \(sessionId)"
+        }
+
+        if let sessionDuration = sessionDuration {
+            frontmatter += "\nsession_duration: \(sessionDuration)"
+        }
+
+        frontmatter += "\n---"
+
+        // Combine frontmatter and OCR text
+        let markdown = "\(frontmatter)\n\n\(cleanedText)"
 
         do {
-            let jsonData = try encoder.encode(capture)
-            try jsonData.write(to: filePath)
+            try markdown.write(to: filePath, atomically: true, encoding: .utf8)
         } catch {
             logger.error("Failed to save capture \(filename): \(error.localizedDescription)")
         }
