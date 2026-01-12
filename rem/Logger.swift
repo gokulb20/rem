@@ -1,9 +1,8 @@
 //
 //  Logger.swift
-//  rem
+//  Punk Records
 //
 //  Production-ready logging infrastructure
-//  Created: 2026-01-12
 //
 
 import Foundation
@@ -11,13 +10,13 @@ import os
 
 // MARK: - Centralized Logger
 
-/// Centralized logging infrastructure for Rem
+/// Centralized logging infrastructure for Punk Records
 /// Uses Apple's unified logging system (os.Logger) with consistent formatting
 final class RemLogger {
     static let shared = RemLogger()
 
-    // Subsystem for all Rem logs
-    private let subsystem = Bundle.main.bundleIdentifier ?? "today.jason.rem"
+    // Subsystem for all Punk Records logs
+    private let subsystem = Bundle.main.bundleIdentifier ?? "punk.records"
 
     // Category-specific loggers
     private(set) lazy var database = Logger(subsystem: subsystem, category: "Database")

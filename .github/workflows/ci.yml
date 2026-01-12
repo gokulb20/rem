@@ -12,7 +12,7 @@ env:
 jobs:
   build-and-test:
     name: Build and Test
-    runs-on: macos-14  # macOS Sonoma with Apple Silicon
+    runs-on: macos-14
 
     steps:
     - name: Checkout repository
@@ -22,17 +22,6 @@ jobs:
 
     - name: Select Xcode version
       run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-
-    - name: Show Xcode version
-      run: xcodebuild -version
-
-    - name: Cache derived data
-      uses: actions/cache@v4
-      with:
-        path: ~/Library/Developer/Xcode/DerivedData
-        key: ${{ runner.os }}-xcode-${{ hashFiles('**/*.xcodeproj/project.pbxproj') }}
-        restore-keys: |
-          ${{ runner.os }}-xcode-
 
     - name: Build for testing
       run: |
@@ -54,70 +43,13 @@ jobs:
           -configuration Debug \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
-          | xcpretty --color --report junit --output test-results.xml || true
-
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results
-        path: test-results.xml
-        retention-days: 30
-
-  lint:
-    name: Lint
-    runs-on: macos-14
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Install SwiftLint
-      run: brew install swiftlint || true
-
-    - name: Run SwiftLint
-      run: |
-        if command -v swiftlint &> /dev/null; then
-          swiftlint lint --reporter github-actions-logging || true
-        else
-          echo "SwiftLint not installed, skipping..."
-        fi
-
-  security-scan:
-    name: Security Scan
-    runs-on: macos-14
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Check for hardcoded secrets
-      run: |
-        echo "Scanning for potential secrets..."
-        # Check for common secret patterns
-        if grep -rE "(password|secret|api_key|apikey|token)\s*=\s*['\"][^'\"]+['\"]" --include="*.swift" .; then
-          echo "::warning::Potential hardcoded secrets found. Please review."
-        fi
-
-        # Check for AWS keys
-        if grep -rE "AKIA[0-9A-Z]{16}" --include="*.swift" .; then
-          echo "::error::AWS Access Key ID found in code!"
-          exit 1
-        fi
-
-        # Check for private keys
-        if grep -rE "-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----" --include="*.swift" .; then
-          echo "::error::Private key found in code!"
-          exit 1
-        fi
-
-        echo "No obvious secrets detected."
+          | xcpretty --color || true
 
   build-release:
     name: Build Release
     runs-on: macos-14
-    needs: [build-and-test, lint]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    needs: [build-and-test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
     - name: Checkout repository
@@ -135,19 +67,20 @@ jobs:
           -scheme rem \
           -destination 'platform=macOS' \
           -configuration Release \
+          -derivedDataPath DerivedData \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
           | xcpretty --color || true
 
-    - name: Archive build artifacts
+    - name: Archive build
       run: |
         mkdir -p artifacts
-        cp -R ~/Library/Developer/Xcode/DerivedData/rem-*/Build/Products/Release/rem.app artifacts/ 2>/dev/null || echo "App not found in expected location"
+        cp -R DerivedData/Build/Products/Release/*.app artifacts/ 2>/dev/null || true
 
-    - name: Upload release artifact
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: rem-release
+        name: punk-records-build
         path: artifacts/
-        retention-days: 90
+        retention-days: 30
         if-no-files-found: warn

@@ -1,0 +1,14 @@
+<svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Vinyl record with recording indicator -->
+  <!-- Outer ring -->
+  <circle cx="11" cy="11" r="9" stroke="currentColor" stroke-width="1.5" fill="none"/>
+
+  <!-- Inner groove -->
+  <circle cx="11" cy="11" r="6" stroke="currentColor" stroke-width="0.5" fill="none" opacity="0.5"/>
+
+  <!-- Center with red recording dot -->
+  <circle cx="11" cy="11" r="3" fill="#22c55e"/>
+
+  <!-- Spindle -->
+  <circle cx="11" cy="11" r="1" fill="white"/>
+</svg>
