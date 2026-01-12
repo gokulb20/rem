@@ -534,22 +534,29 @@ class DataExporter {
     private func extractFilesEdited(windowTitle: String?, ocrText: String) -> [String] {
         var files: Set<String> = []
 
-        // Common source file extensions
-        let filePattern = #"[\w-]+\.(swift|ts|tsx|js|jsx|py|rs|go|java|kt|cpp|c|h|hpp|css|scss|html|json|yaml|yml|md|sql|rb)"#
+        // Whitelist of real code file extensions (no single-letter ambiguous ones like .c .h)
+        let safeExtensions = ["swift", "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "kt",
+                              "cpp", "hpp", "css", "scss", "html", "json", "yaml", "yml", "md",
+                              "sql", "rb", "vue", "svelte", "astro", "prisma", "graphql"]
 
-        // Extract from window title
+        // Pattern that requires at least 2 chars before extension
+        let filePattern = #"[\w][\w-]+\.(swift|ts|tsx|js|jsx|py|rs|go|java|kt|cpp|hpp|css|scss|html|json|yaml|yml|md|sql|rb|vue|svelte|astro|prisma|graphql)"#
+
+        // Extract from window title (high confidence)
         if let title = windowTitle {
             if let range = title.range(of: filePattern, options: .regularExpression) {
-                files.insert(String(title[range]))
+                let file = String(title[range])
+                if isValidSourceFile(file) {
+                    files.insert(file)
+                }
             }
         }
 
         // Extract from OCR - look for file operation patterns
         let fileOperationPatterns = [
-            #"(?:Read|Edit|Update|Write|Modified|Created|Deleted)(?:\s+file)?:?\s*([\w/.-]+\.\w+)"#,
-            #"modified:\s*([\w/.-]+\.\w+)"#,
-            #"new file:\s*([\w/.-]+\.\w+)"#,
-            #"renamed:\s*[\w/.-]+\s*->\s*([\w/.-]+\.\w+)"#,
+            #"(?:Read|Edit|Update|Write|Modified|Created|Deleted)(?:\s+file)?:?\s*([\w/.-]+\.(?:swift|ts|tsx|js|py|rs|go|java|json|md|yml))"#,
+            #"modified:\s*([\w/.-]+\.(?:swift|ts|tsx|js|py|rs|go|java|json|md|yml))"#,
+            #"new file:\s*([\w/.-]+\.(?:swift|ts|tsx|js|py|rs|go|java|json|md|yml))"#,
         ]
 
         for pattern in fileOperationPatterns {
@@ -559,9 +566,8 @@ class DataExporter {
                 for match in matches.prefix(5) {
                     if match.numberOfRanges > 1, let fileRange = Range(match.range(at: 1), in: ocrText) {
                         let file = String(ocrText[fileRange])
-                        // Just get filename, not full path
                         let filename = file.components(separatedBy: "/").last ?? file
-                        if filename.count > 2 && filename.count < 60 {
+                        if isValidSourceFile(filename) {
                             files.insert(filename)
                         }
                     }
@@ -569,14 +575,14 @@ class DataExporter {
             }
         }
 
-        // Also look for simple file mentions in OCR
+        // Also look for simple file mentions in OCR (stricter matching)
         if let regex = try? NSRegularExpression(pattern: filePattern, options: []) {
             let range = NSRange(ocrText.startIndex..., in: ocrText)
             let matches = regex.matches(in: ocrText, range: range)
             for match in matches.prefix(10) {
                 if let matchRange = Range(match.range, in: ocrText) {
                     let file = String(ocrText[matchRange])
-                    if file.count > 2 && file.count < 60 {
+                    if isValidSourceFile(file) {
                         files.insert(file)
                     }
                 }
@@ -584,6 +590,52 @@ class DataExporter {
         }
 
         return Array(files).sorted()
+    }
+
+    /// Filter out OCR garbage that looks like files but isn't
+    private func isValidSourceFile(_ filename: String) -> Bool {
+        // Must be reasonable length
+        guard filename.count >= 3 && filename.count < 60 else { return false }
+
+        // Filter out reverse domain patterns (com.apple.*, org.*, etc.)
+        let reverseDomainPrefixes = ["com.", "org.", "net.", "io.", "dev.", "co.", "app.", "eom.", "eo."]
+        for prefix in reverseDomainPrefixes {
+            if filename.lowercased().hasPrefix(prefix) {
+                return false
+            }
+        }
+
+        // Filter out patterns that look like bundle IDs or process names
+        if filename.contains(".apple.") || filename.contains(".google.") || filename.contains(".microsoft.") {
+            return false
+        }
+
+        // Filter OCR garbage patterns (random short words + extension)
+        let garbagePatterns = [
+            #"^[a-z]{1,3}\.[a-z]+$"#,           // Single/double letter files like "c.c", "go.ts"
+            #"^[A-Z][a-z]{0,2}\.[a-z]+$"#,      // "On.js", "Co.py" - OCR artifacts
+            #"mailout|ollabstr|hotmail"#,       // Email/company OCR noise
+            #"^Il[a-z]"#,                       // OCR misread of "// " or "| "
+        ]
+
+        for pattern in garbagePatterns {
+            if filename.range(of: pattern, options: .regularExpression) != nil {
+                return false
+            }
+        }
+
+        // Must have a recognizable code file extension
+        let validExtensions = ["swift", "ts", "tsx", "js", "jsx", "py", "rs", "go", "java", "kt",
+                               "cpp", "hpp", "css", "scss", "html", "json", "yaml", "yml", "md",
+                               "sql", "rb", "vue", "svelte", "astro", "prisma", "graphql", "sh"]
+        let ext = (filename as NSString).pathExtension.lowercased()
+        guard validExtensions.contains(ext) else { return false }
+
+        // Filename before extension should be at least 2 real chars
+        let nameWithoutExt = (filename as NSString).deletingPathExtension
+        guard nameWithoutExt.count >= 2 else { return false }
+
+        return true
     }
 
     private func extractSearches(app: String, ocrText: String) -> [String] {
@@ -723,7 +775,7 @@ class DataExporter {
                     while url.hasSuffix(".") || url.hasSuffix(",") || url.hasSuffix(":") {
                         url = String(url.dropLast())
                     }
-                    if url.count > 10 && url.count < 500 {
+                    if url.count > 10 && url.count < 500 && isValidUrl(url) {
                         urls.insert(url)
                     }
                 }
@@ -732,7 +784,7 @@ class DataExporter {
 
         // Domain patterns commonly seen in browser OCR (without protocol)
         // These often appear in Safari's address bar
-        let domainPattern = #"(?:^|\s)((?:[\w-]+\.)+(?:com|org|net|io|dev|ai|co|app|me|tv|edu|gov|uk|de|fr|jp|cn|in|ru|br|au)(?:/[^\s]*)?)"#
+        let domainPattern = #"(?:^|\s)((?:[\w-]+\.)+(?:com|org|net|io|dev|ai|co|app|me|tv|edu|gov)(?:/[^\s]*)?)"#
         if let regex = try? NSRegularExpression(pattern: domainPattern, options: .caseInsensitive) {
             let range = NSRange(ocrText.startIndex..., in: ocrText)
             let matches = regex.matches(in: ocrText, range: range)
@@ -743,17 +795,66 @@ class DataExporter {
                     while domain.hasSuffix(".") || domain.hasSuffix(",") {
                         domain = String(domain.dropLast())
                     }
-                    // Skip common false positives
-                    let skipPatterns = ["e.g.", "i.e.", "etc.", "vs.", "min.", "max."]
-                    if !skipPatterns.contains(where: { domain.lowercased().contains($0) }) &&
-                       domain.count > 5 && domain.count < 200 {
-                        urls.insert("https://\(domain)")
+                    let url = "https://\(domain)"
+                    if domain.count > 5 && domain.count < 200 && isValidUrl(url) {
+                        urls.insert(url)
                     }
                 }
             }
         }
 
         return Array(urls).sorted()
+    }
+
+    /// Filter out OCR garbage that looks like URLs but isn't
+    private func isValidUrl(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString), let host = url.host else { return false }
+        let lowerHost = host.lowercased()
+
+        // Filter out reverse domain OCR noise (com.apple.*, eom.apple.*, etc.)
+        let reverseDomainPrefixes = ["com.", "org.", "net.", "io.", "dev.", "co.", "app.", "eom.", "eo."]
+        for prefix in reverseDomainPrefixes {
+            if lowerHost.hasPrefix(prefix) && lowerHost.contains(".apple") {
+                return false
+            }
+        }
+
+        // Filter out system bundle ID patterns
+        if lowerHost.hasPrefix("com.") || lowerHost.hasPrefix("org.") || lowerHost.hasPrefix("eom.") {
+            return false
+        }
+
+        // Filter out short nonsense domains (OCR typos)
+        // These are often OCR misreads: "sereen.dev", "logger.de", "parts.app"
+        let domainParts = lowerHost.components(separatedBy: ".")
+        if let firstPart = domainParts.first {
+            // Very short first part is suspicious unless it's a known site
+            let knownShortDomains = ["x", "t", "fb", "g", "yt", "ok", "vk", "wa", "me", "be", "go", "so", "is"]
+            if firstPart.count <= 2 && !knownShortDomains.contains(firstPart) {
+                return false
+            }
+        }
+
+        // Filter out common OCR garbage patterns
+        let garbagePatterns = [
+            "apple.co", "apple.me",           // OCR of com.apple.*
+            "logger.de", "sereen.dev",        // Known typos
+            "intents.app", "parts.app",       // macOS process names
+            "shared.fr", "frame.c",           // OCR noise
+            "httpjlwww", "httpllwww",         // OCR misread of http://www
+        ]
+        for pattern in garbagePatterns {
+            if lowerHost.contains(pattern) || urlString.lowercased().contains(pattern) {
+                return false
+            }
+        }
+
+        // Must have a proper TLD structure (at least x.y format)
+        if domainParts.count < 2 {
+            return false
+        }
+
+        return true
     }
 
     // MARK: - Enhanced Analysis
@@ -1370,10 +1471,11 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     // More robust dark mode detection
     let isDarkMode = self.statusBarItem.button?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 
+    // Icon logic: normal icon when ON/recording, crossed-out when OFF/idle
     let icon = self.isCapturing == .recording ? (
-        isDarkMode ? self.recordingStatusImageDark : self.recordingStatusImage
-    ) : (
         isDarkMode ? self.idleStatusImageDark : self.idleStatusImage
+    ) : (
+        isDarkMode ? self.recordingStatusImageDark : self.recordingStatusImage
     )
 
     icon?.draw(in: rect)
