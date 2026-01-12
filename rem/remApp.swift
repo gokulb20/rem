@@ -6,6 +6,586 @@
 //
 
 import AppKit
+
+// MARK: - Data Exporter for Claude Access
+
+struct CaptureData: Codable {
+    let timestamp: String
+    let app: String
+    let windowTitle: String?
+    let url: String?
+    let ocrText: String
+    let frameId: Int64
+    let sessionId: String?      // Groups related captures
+    let sessionDuration: Int?   // Seconds in current session
+}
+
+// Activity entry for timeline - captures what you were actually doing
+struct ActivityEntry: Codable {
+    let time: String           // "21:30"
+    let app: String
+    let windowTitle: String?
+    let url: String?
+    let keyContent: [String]   // Important text from this moment
+}
+
+// Hourly summary with full recall capability
+struct HourlySummary: Codable {
+    let hour: String
+    let date: String
+    let timeline: [ActivityEntry]       // What you did, in order
+    let urlsVisited: [String]           // All URLs this hour
+    let appsUsed: [String: Int]         // app -> minutes
+    let keyTopics: [String]             // Extracted topics/titles
+}
+
+// Daily journal for end-of-day recall
+struct DailyJournal: Codable {
+    let date: String
+    let timeline: [ActivityEntry]       // Full day timeline
+    let allUrls: [URLVisit]             // Every URL with context
+    let appSummary: [String: Int]       // Time per app in minutes
+    let keyMoments: [String]            // Notable things you saw
+}
+
+struct URLVisit: Codable {
+    let url: String
+    let title: String?
+    let firstSeen: String
+    let visitCount: Int
+}
+
+struct SessionInfo {
+    var id: String
+    var app: String
+    var startTime: Date
+    var captureCount: Int
+}
+
+class DataExporter {
+    static let shared = DataExporter()
+
+    private let exportBaseDir: URL
+    private let fileManager = FileManager.default
+    private var dailyStats: [String: Int] = [:]  // app -> capture count
+    private var dailyUrls: [String: Int] = [:]   // url -> visit count
+    private var lastDigestDate: String = ""
+
+    // Deduplication
+    private var lastOcrHash: Int = 0
+    private var lastApp: String = ""
+    private var lastWindowTitle: String = ""
+    private var duplicateSkipCount: Int = 0
+
+    // Session tracking
+    private var currentSession: SessionInfo?
+    private let sessionTimeoutSeconds: TimeInterval = 300  // 5 min gap = new session
+    private var lastCaptureTime: Date?
+
+    // Hourly tracking - for perfect recall
+    private var hourlyTimeline: [ActivityEntry] = []
+    private var hourlyUrls: Set<String> = []
+    private var hourlyStats: [String: Int] = [:]
+    private var hourlyTopics: Set<String> = []
+    private var lastHour: Int = -1
+
+    // Daily tracking - accumulated for journal
+    private var dailyTimeline: [ActivityEntry] = []
+    private var dailyUrlVisits: [String: (title: String?, firstSeen: String, count: Int)] = [:]
+    private var dailyKeyMoments: [String] = []
+
+    // Retention settings
+    let videoRetentionHours: Int = 1
+
+    init() {
+        let homeDir = fileManager.homeDirectoryForCurrentUser
+        exportBaseDir = homeDir.appendingPathComponent("rem-data")
+        try? fileManager.createDirectory(at: exportBaseDir, withIntermediateDirectories: true)
+    }
+
+    // MARK: - Window Title Extraction
+
+    func getWindowTitle(for appName: String?) -> String? {
+        guard let app = appName else { return nil }
+
+        let script = """
+        tell application "System Events"
+            tell process "\(app)"
+                try
+                    return name of front window
+                on error
+                    return ""
+                end try
+            end tell
+        end tell
+        """
+
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: script) {
+            let output = scriptObject.executeAndReturnError(&error)
+            if error == nil, let title = output.stringValue, !title.isEmpty {
+                return title
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Browser URL Extraction
+
+    func getBrowserURL(for appName: String?) -> String? {
+        guard let app = appName else { return nil }
+
+        var script: String?
+
+        if app == "Safari" {
+            script = """
+            tell application "Safari"
+                try
+                    return URL of current tab of front window
+                on error
+                    return ""
+                end try
+            end tell
+            """
+        } else if app == "Google Chrome" || app == "Chrome" {
+            script = """
+            tell application "Google Chrome"
+                try
+                    return URL of active tab of front window
+                on error
+                    return ""
+                end try
+            end tell
+            """
+        } else if app == "Arc" {
+            script = """
+            tell application "Arc"
+                try
+                    return URL of active tab of front window
+                on error
+                    return ""
+                end try
+            end tell
+            """
+        } else if app == "Firefox" {
+            // Firefox doesn't support AppleScript well, skip
+            return nil
+        }
+
+        guard let scriptSource = script else { return nil }
+
+        var error: NSDictionary?
+        if let scriptObject = NSAppleScript(source: scriptSource) {
+            let output = scriptObject.executeAndReturnError(&error)
+            if error == nil, let url = output.stringValue, !url.isEmpty {
+                return url
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Deduplication & Cleaning
+
+    private func isDuplicate(ocrText: String, appName: String?) -> Bool {
+        let hash = ocrText.hashValue
+        let app = appName ?? "Unknown"
+
+        // Same app and same content = duplicate
+        if hash == lastOcrHash && app == lastApp {
+            duplicateSkipCount += 1
+            return true
+        }
+
+        lastOcrHash = hash
+        lastApp = app
+        duplicateSkipCount = 0
+        return false
+    }
+
+    private func cleanOcrText(_ text: String) -> String {
+        var cleaned = text
+
+        // Remove single character lines (OCR noise)
+        let lines = cleaned.components(separatedBy: "\n")
+        let filteredLines = lines.filter { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.count > 2 || trimmed.isEmpty
+        }
+        cleaned = filteredLines.joined(separator: "\n")
+
+        // Collapse multiple newlines
+        while cleaned.contains("\n\n\n") {
+            cleaned = cleaned.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+
+        // Remove common OCR artifacts
+        let artifacts = ["￿", "�", "|||", "•••", "....", "____"]
+        for artifact in artifacts {
+            cleaned = cleaned.replacingOccurrences(of: artifact, with: "")
+        }
+
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func hasMinimumContent(_ text: String) -> Bool {
+        let words = text.components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 }
+        return words.count >= 5  // At least 5 meaningful words
+    }
+
+    // MARK: - Session Tracking
+
+    private func updateSession(app: String, timestamp: Date) -> (sessionId: String, duration: Int) {
+        let timeSinceLastCapture = lastCaptureTime.map { timestamp.timeIntervalSince($0) } ?? 0
+
+        // Start new session if: different app, or timeout exceeded, or first capture
+        if currentSession == nil ||
+           currentSession?.app != app ||
+           timeSinceLastCapture > sessionTimeoutSeconds {
+
+            // Generate session ID: app-HHMM
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HHmm"
+            let sessionId = "\(app)-\(formatter.string(from: timestamp))"
+
+            currentSession = SessionInfo(
+                id: sessionId,
+                app: app,
+                startTime: timestamp,
+                captureCount: 1
+            )
+        } else {
+            currentSession?.captureCount += 1
+        }
+
+        lastCaptureTime = timestamp
+
+        let duration = Int(timestamp.timeIntervalSince(currentSession!.startTime))
+        return (currentSession!.id, duration)
+    }
+
+    // MARK: - Activity Tracking for Perfect Recall
+
+    private func trackActivity(app: String, windowTitle: String?, url: String?, ocrText: String, timestamp: Date) {
+        let hour = Calendar.current.component(.hour, from: timestamp)
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH:mm"
+        let timeStr = timeFormatter.string(from: timestamp)
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let dateStr = dateFormatter.string(from: timestamp)
+
+        // New hour? Generate summary for previous hour
+        if lastHour != -1 && hour != lastHour {
+            generateHourlySummary(hour: lastHour, date: timestamp)
+            // Reset hourly tracking
+            hourlyTimeline.removeAll()
+            hourlyUrls.removeAll()
+            hourlyStats.removeAll()
+            hourlyTopics.removeAll()
+        }
+        lastHour = hour
+
+        // Extract key content from this capture
+        let keyContent = extractKeyContent(from: ocrText, windowTitle: windowTitle)
+
+        // Only add to timeline if something meaningful changed
+        let titleChanged = windowTitle != nil && windowTitle != lastWindowTitle
+        let isNewActivity = titleChanged || hourlyTimeline.isEmpty ||
+                           (hourlyTimeline.last?.app != app)
+
+        if isNewActivity {
+            let activity = ActivityEntry(
+                time: timeStr,
+                app: app,
+                windowTitle: windowTitle,
+                url: url,
+                keyContent: keyContent
+            )
+            hourlyTimeline.append(activity)
+            dailyTimeline.append(activity)
+
+            // Track key moment if title is interesting
+            if let title = windowTitle, title.count > 10 {
+                let moment = "\(timeStr) - \(app): \(title)"
+                if dailyKeyMoments.count < 100 {
+                    dailyKeyMoments.append(moment)
+                }
+            }
+        }
+
+        if let title = windowTitle {
+            lastWindowTitle = title
+        }
+
+        // Track URL visits
+        if let urlStr = url {
+            hourlyUrls.insert(urlStr)
+            if var existing = dailyUrlVisits[urlStr] {
+                existing.count += 1
+                dailyUrlVisits[urlStr] = existing
+            } else {
+                dailyUrlVisits[urlStr] = (title: windowTitle, firstSeen: timeStr, count: 1)
+            }
+        }
+
+        // Track time per app
+        hourlyStats[app, default: 0] += 2
+
+        // Track topics
+        for content in keyContent {
+            hourlyTopics.insert(content)
+        }
+    }
+
+    private func extractKeyContent(from text: String, windowTitle: String?) -> [String] {
+        var content: [String] = []
+
+        // Add window title as key content if meaningful
+        if let title = windowTitle, title.count > 5 && title.count < 100 {
+            content.append(title)
+        }
+
+        // Extract meaningful lines from OCR
+        let lines = text.components(separatedBy: "\n")
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Skip noise
+            if trimmed.count < 8 || trimmed.count > 80 { continue }
+            if trimmed.filter({ $0.isLetter }).count < 5 { continue }
+
+            // Keep lines that look like titles/headings
+            let words = trimmed.components(separatedBy: .whitespaces)
+            if words.count >= 3 && words.count <= 12 {
+                // Capitalize check - titles often have capitalized words
+                let capitalizedWords = words.filter { word in
+                    guard let first = word.first else { return false }
+                    return first.isUppercase
+                }
+                if capitalizedWords.count >= 2 || trimmed.contains(" - ") || trimmed.contains(" | ") {
+                    if content.count < 5 && !content.contains(trimmed) {
+                        content.append(trimmed)
+                    }
+                }
+            }
+        }
+
+        return content
+    }
+
+    private func generateHourlySummary(hour: Int, date: Date) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let dayFolder = formatter.string(from: date)
+        let dayDir = exportBaseDir.appendingPathComponent(dayFolder)
+
+        let hourStr = String(format: "%02d:00", hour)
+        let summary = HourlySummary(
+            hour: hourStr,
+            date: dayFolder,
+            timeline: hourlyTimeline,
+            urlsVisited: Array(hourlyUrls),
+            appsUsed: hourlyStats.mapValues { $0 / 60 },
+            keyTopics: Array(hourlyTopics.prefix(30))
+        )
+
+        let filename = "hour-\(String(format: "%02d", hour))-summary.json"
+        let filePath = dayDir.appendingPathComponent(filename)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(summary) {
+            try? data.write(to: filePath)
+        }
+    }
+
+    private func generateDailyJournal(for date: String) {
+        let dayDir = exportBaseDir.appendingPathComponent(date)
+
+        // Convert URL visits to array
+        let urlVisits = dailyUrlVisits.map { (url, info) in
+            URLVisit(url: url, title: info.title, firstSeen: info.firstSeen, visitCount: info.count)
+        }.sorted { $0.visitCount > $1.visitCount }
+
+        let journal = DailyJournal(
+            date: date,
+            timeline: dailyTimeline,
+            allUrls: urlVisits,
+            appSummary: dailyStats.mapValues { $0 * 2 / 60 },  // Convert to minutes
+            keyMoments: dailyKeyMoments
+        )
+
+        let filename = "\(date)-journal.json"
+        let filePath = dayDir.appendingPathComponent(filename)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(journal) {
+            try? data.write(to: filePath)
+        }
+
+        // Reset daily tracking
+        dailyTimeline.removeAll()
+        dailyUrlVisits.removeAll()
+        dailyKeyMoments.removeAll()
+    }
+
+    // MARK: - Export to JSON
+
+    func exportCapture(timestamp: Date, appName: String?, ocrText: String, frameId: Int64) {
+        // Clean the OCR text first
+        let cleanedText = cleanOcrText(ocrText)
+
+        // Skip if no meaningful content
+        guard hasMinimumContent(cleanedText) else { return }
+
+        // Skip duplicates
+        guard !isDuplicate(ocrText: cleanedText, appName: appName) else { return }
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let dayFolder = dateFormatter.string(from: timestamp)
+
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH-mm-ss"
+        let timeString = timeFormatter.string(from: timestamp)
+
+        let dayDir = exportBaseDir.appendingPathComponent(dayFolder)
+        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+
+        // Get window title and URL
+        let windowTitle = getWindowTitle(for: appName)
+        let url = getBrowserURL(for: appName)
+
+        // Update session tracking
+        let app = appName ?? "Unknown"
+        let (sessionId, sessionDuration) = updateSession(app: app, timestamp: timestamp)
+
+        // Track activity for perfect recall summaries
+        trackActivity(app: app, windowTitle: windowTitle, url: url, ocrText: cleanedText, timestamp: timestamp)
+
+        // Create structured capture data
+        let capture = CaptureData(
+            timestamp: timestamp.ISO8601Format(),
+            app: app,
+            windowTitle: windowTitle,
+            url: url,
+            ocrText: cleanedText,  // Use cleaned text
+            frameId: frameId,
+            sessionId: sessionId,
+            sessionDuration: sessionDuration
+        )
+
+        // Save as JSON
+        let safeAppName = app
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .prefix(30)
+
+        let filename = "\(timeString)_\(safeAppName).json"
+        let filePath = dayDir.appendingPathComponent(filename)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        if let jsonData = try? encoder.encode(capture) {
+            try? jsonData.write(to: filePath)
+        }
+
+        // Track stats for daily digest
+        trackStats(app: appName, url: url, date: dayFolder)
+
+        // Generate journal and digest if day changed
+        if dayFolder != lastDigestDate && !lastDigestDate.isEmpty {
+            generateDailyJournal(for: lastDigestDate)
+            generateDigest(for: lastDigestDate)
+        }
+        lastDigestDate = dayFolder
+    }
+
+    // MARK: - Stats Tracking
+
+    private func trackStats(app: String?, url: String?, date: String) {
+        if let appName = app {
+            dailyStats[appName, default: 0] += 1
+        }
+        if let urlString = url, let host = URL(string: urlString)?.host {
+            dailyUrls[host, default: 0] += 1
+        }
+    }
+
+    // MARK: - Daily Digest
+
+    func generateDigest(for date: String) {
+        let dayDir = exportBaseDir.appendingPathComponent(date)
+
+        // Count files and calculate time (2 sec per capture)
+        var appTimes: [String: [String: Any]] = [:]
+        for (app, count) in dailyStats {
+            appTimes[app] = [
+                "captures": count,
+                "minutes": count * 2 / 60  // 2 seconds per capture
+            ]
+        }
+
+        // Top URLs
+        let topUrls = dailyUrls.sorted { $0.value > $1.value }.prefix(20).map { ["url": $0.key, "visits": $0.value] }
+
+        let digest: [String: Any] = [
+            "date": date,
+            "total_captures": dailyStats.values.reduce(0, +),
+            "apps": appTimes,
+            "top_urls": topUrls
+        ]
+
+        let digestPath = dayDir.appendingPathComponent("\(date)-digest.json")
+
+        if let jsonData = try? JSONSerialization.data(withJSONObject: digest, options: [.prettyPrinted, .sortedKeys]) {
+            try? jsonData.write(to: digestPath)
+        }
+
+        // Reset stats for new day
+        dailyStats.removeAll()
+        dailyUrls.removeAll()
+    }
+
+    // MARK: - Cleanup
+
+    func performCleanup() {
+        cleanupOldVideos()
+        // Generate digest for today if needed
+        let today = DateFormatter()
+        today.dateFormat = "yyyy-MM-dd"
+        let todayStr = today.string(from: Date())
+        if !dailyStats.isEmpty {
+            generateDigest(for: todayStr)
+        }
+    }
+
+    private func cleanupOldVideos() {
+        guard videoRetentionHours > 0 else { return }
+        let cutoffDate = Calendar.current.date(byAdding: .hour, value: -videoRetentionHours, to: Date())!
+
+        if let saveDir = RemFileManager.shared.getSaveDir() {
+            do {
+                let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
+                for file in files {
+                    if file.pathExtension == "mp4" {
+                        let attrs = try fileManager.attributesOfItem(atPath: file.path)
+                        if let creationDate = attrs[.creationDate] as? Date, creationDate < cutoffDate {
+                            try fileManager.removeItem(at: file)
+                            print("Deleted old video: \(file.lastPathComponent)")
+                        }
+                    }
+                }
+            } catch {
+                print("Video cleanup error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func getExportDir() -> URL { return exportBaseDir }
+}
 import CoreGraphics
 import os
 import ScreenCaptureKit
@@ -172,6 +752,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize the search view
         searchView = SearchView(onThumbnailClick: openFullView)
         observeSystemNotifications()
+
+        // Schedule cleanup every hour (delete old videos/images)
+        Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
+            DataExporter.shared.performCleanup()
+        }
+        // Run cleanup once on launch
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 30) {
+            DataExporter.shared.performCleanup()
+        }
+
+        // Auto-start remembering on launch (no user action needed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.enableRecording()
+        }
     }
 
 func drawStatusBarIcon(rect: CGRect) -> Bool {
@@ -673,7 +1267,7 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                         }
                     }
                     DatabaseManager.shared.insertTextsForFrames(entries: textEntries)
-                    
+
                     var texts = textEntries.map { $0.text }
                     if self.settingsManager.settings.saveEverythingCopiedToClipboard {
                         let newClipboardText = ClipboardManager.shared.getClipboardIfChanged() ?? ""
@@ -681,6 +1275,15 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                     }
                     let cleanText = TextMerger.shared.mergeTexts(texts: texts)
                     DatabaseManager.shared.insertAllTextForFrame(frameId: frameId, text: cleanText)
+
+                    // Export to ~/rem-data for Claude access
+                    let activeApp = NSWorkspace.shared.frontmostApplication?.localizedName
+                    DataExporter.shared.exportCapture(
+                        timestamp: Date(),
+                        appName: activeApp,
+                        ocrText: cleanText,
+                        frameId: frameId
+                    )
                 }
                 
                 if self.settingsManager.settings.fastOCR {

@@ -15,7 +15,7 @@ struct AppSettings: Codable {
     var enableCmdScrollShortcut: Bool
     var onlyOCRFrontmostWindow: Bool = true
     var fastOCR: Bool = true
-    var startRememberingOnStartup: Bool = false
+    var startRememberingOnStartup: Bool = true  // Always on by default
     var recordWindowWithMouse: Bool = false
 }
 
@@ -52,7 +52,7 @@ struct SettingsView: View {
                 .font(.title)
                 .padding(.bottom)
             Form {
-                Toggle("Launch rem and start remembering on startup", isOn: $settingsManager.settings.startRememberingOnStartup)
+                Toggle("Launch rem on system startup", isOn: $settingsManager.settings.startRememberingOnStartup)
                     .onChange(of: settingsManager.settings.startRememberingOnStartup) { value in
                         LaunchAtLogin.isEnabled = value
                         settingsManager.saveSettings()
