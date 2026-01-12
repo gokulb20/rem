@@ -96,7 +96,7 @@ class DatabaseManager {
             try db.run(chunksFramesView.drop(ifExists: true))
             try db.run(framesText.drop(ifExists: true))
         } catch {
-            print("Failed to delete tables")
+            logger.error("Failed to delete tables: \(error.localizedDescription)")
         }
         
         createTables()
@@ -209,7 +209,7 @@ class DatabaseManager {
             try db.run(framesText.createIndex(frameId, unique: false, ifNotExists: true))
             // Additional indices can be added here as needed
         } catch {
-            print("Failed to create indices: \(error)")
+            logger.error("Failed to create indices: \(error.localizedDescription)")
         }
     }
     
@@ -219,7 +219,7 @@ class DatabaseManager {
                 return lastFrame[chunkId] + 1
             }
         } catch {
-            print("Error fetching last chunk ID: \(error)")
+            logger.warning("Error fetching last chunk ID: \(error.localizedDescription)")
         }
         return 1
     }
@@ -230,7 +230,7 @@ class DatabaseManager {
                 return lastFrame[id]
             }
         } catch {
-            print("Error fetching last frame ID: \(error)")
+            logger.warning("Error fetching last frame ID: \(error.localizedDescription)")
         }
         return 0
     }
@@ -241,7 +241,7 @@ class DatabaseManager {
                 return lastFrame[chunksFramesIndex]
             }
         } catch {
-            print("Error fetching last chunks frames Index: \(error)")
+            logger.warning("Error fetching last chunks frames index: \(error.localizedDescription)")
         }
         return 0
     }
@@ -289,7 +289,7 @@ class DatabaseManager {
                 insertUniqueApplicationNames(appName)
             }
         } catch {
-            print("Error checking existence of app name: \(error)")
+            logger.warning("Error checking existence of app name: \(error.localizedDescription)")
         }
     }
 
@@ -298,7 +298,7 @@ class DatabaseManager {
         do {
             try db.run(insert)
         } catch {
-            print("Error inserting unique application name: \(error)")
+            logger.warning("Error inserting unique application name: \(error.localizedDescription)")
         }
     }
     
@@ -439,7 +439,7 @@ class DatabaseManager {
                 texts.append(textFrame[text])
             }
         } catch {
-            print(error)
+            logger.warning("Error getting recent text context: \(error.localizedDescription)")
         }
         return texts
     }
@@ -505,7 +505,7 @@ class DatabaseManager {
                 results.append((frameId, matchedText, applicationName, timestamp, filePath, offsetIndex))
             }
         } catch {
-            print("Search error: \(error)")
+            logger.error("Search error: \(error.localizedDescription)")
         }
         return results
     }
@@ -534,7 +534,7 @@ class DatabaseManager {
                 results.append((frameId, nil, applicationName, timestamp, filePath, offsetIndex))
             }
         } catch {
-            print("Error fetching recent results: \(error)")
+            logger.error("Error fetching recent results: \(error.localizedDescription)")
         }
         return results
     }
@@ -550,7 +550,7 @@ class DatabaseManager {
                 }
             }
         } catch {
-            print("Error fetching application names: \(error)")
+            logger.error("Error fetching application names: \(error.localizedDescription)")
         }
         
         return applicationNames
@@ -590,7 +590,7 @@ class DatabaseManager {
             let aI = try generator.copyCGImage(at: a, actualTime: nil)
             return aI
         } catch {
-            print("Error extracting frame \(videoURL): \(error)")
+            logger.warning("Error extracting frame from \(videoURL.lastPathComponent): \(error.localizedDescription)")
             return nil
         }
     }

@@ -77,6 +77,9 @@ class DataExporter {
     private var dailyUrls: [String: Int] = [:]   // url -> visit count
     private var lastDigestDate: String = ""
 
+    // Production-ready logging
+    private let logger = RemLogger.shared.export
+
     // Deduplication - using deterministic hash (not Swift's hashValue which changes per session)
     private var lastOcrHash: String = ""
     private var lastApp: String = ""
@@ -119,7 +122,14 @@ class DataExporter {
     init() {
         let homeDir = fileManager.homeDirectoryForCurrentUser
         exportBaseDir = homeDir.appendingPathComponent("rem-data")
-        try? fileManager.createDirectory(at: exportBaseDir, withIntermediateDirectories: true)
+
+        // Create export directory with proper error handling
+        do {
+            try fileManager.createDirectory(at: exportBaseDir, withIntermediateDirectories: true)
+            RemLogger.shared.logInfo("Export directory ready: \(exportBaseDir.path)", context: "init", logger: RemLogger.shared.export)
+        } catch {
+            RemLogger.shared.logError(error, context: "DataExporter.init:createDirectory", logger: RemLogger.shared.export)
+        }
 
         // Pre-compile common browser URL scripts
         precompileBrowserScripts()
@@ -1015,7 +1025,14 @@ class DataExporter {
         formatter.dateFormat = "yyyy-MM-dd"
         let dayFolder = formatter.string(from: date)
         let dayDir = exportBaseDir.appendingPathComponent(dayFolder)
-        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+
+        // Create directory with proper error handling
+        do {
+            try fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create day directory \(dayFolder): \(error.localizedDescription)")
+            return
+        }
 
         let hourStr = String(format: "%02d:00", hour)
 
@@ -1057,8 +1074,13 @@ class DataExporter {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(summary) {
-            try? data.write(to: filePath)
+
+        do {
+            let data = try encoder.encode(summary)
+            try data.write(to: filePath)
+            logger.info("Saved hourly summary: \(filename)")
+        } catch {
+            logger.error("Failed to save hourly summary \(filename): \(error.localizedDescription)")
         }
     }
 
@@ -1093,7 +1115,14 @@ class DataExporter {
         dataLock.unlock()
 
         let dayDir = exportBaseDir.appendingPathComponent(date)
-        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+
+        // Create directory with proper error handling
+        do {
+            try fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create daily journal directory \(date): \(error.localizedDescription)")
+            return
+        }
 
         // Convert URL visits to array
         let urlVisits = snapshotUrlVisits.map { (url, info) in
@@ -1136,8 +1165,13 @@ class DataExporter {
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(journal) {
-            try? data.write(to: filePath)
+
+        do {
+            let data = try encoder.encode(journal)
+            try data.write(to: filePath)
+            logger.info("Saved daily journal: \(filename)")
+        } catch {
+            logger.error("Failed to save daily journal \(filename): \(error.localizedDescription)")
         }
     }
 
@@ -1161,7 +1195,14 @@ class DataExporter {
         let timeString = timeFormatter.string(from: timestamp)
 
         let dayDir = exportBaseDir.appendingPathComponent(dayFolder)
-        try? fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+
+        // Create directory with proper error handling
+        do {
+            try fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create export directory \(dayFolder): \(error.localizedDescription)")
+            return
+        }
 
         // Get window title and URL
         let windowTitle = getWindowTitle(for: appName)
@@ -1198,8 +1239,11 @@ class DataExporter {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
-        if let jsonData = try? encoder.encode(capture) {
-            try? jsonData.write(to: filePath)
+        do {
+            let jsonData = try encoder.encode(capture)
+            try jsonData.write(to: filePath)
+        } catch {
+            logger.error("Failed to save capture \(filename): \(error.localizedDescription)")
         }
 
         // Track stats for daily digest
@@ -1250,8 +1294,12 @@ class DataExporter {
 
         let digestPath = dayDir.appendingPathComponent("\(date)-digest.json")
 
-        if let jsonData = try? JSONSerialization.data(withJSONObject: digest, options: [.prettyPrinted, .sortedKeys]) {
-            try? jsonData.write(to: digestPath)
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: digest, options: [.prettyPrinted, .sortedKeys])
+            try jsonData.write(to: digestPath)
+            logger.info("Saved digest: \(date)-digest.json")
+        } catch {
+            logger.error("Failed to save digest for \(date): \(error.localizedDescription)")
         }
 
         // Reset stats for new day
@@ -1274,23 +1322,39 @@ class DataExporter {
 
     private func cleanupOldVideos() {
         guard videoRetentionHours > 0 else { return }
-        let cutoffDate = Calendar.current.date(byAdding: .hour, value: -videoRetentionHours, to: Date())!
 
-        if let saveDir = RemFileManager.shared.getSaveDir() {
-            do {
-                let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: nil)
-                for file in files {
-                    if file.pathExtension == "mp4" {
-                        let attrs = try fileManager.attributesOfItem(atPath: file.path)
-                        if let creationDate = attrs[.creationDate] as? Date, creationDate < cutoffDate {
-                            try fileManager.removeItem(at: file)
-                            print("Deleted old video: \(file.lastPathComponent)")
-                        }
+        guard let cutoffDate = Calendar.current.date(byAdding: .hour, value: -videoRetentionHours, to: Date()) else {
+            logger.error("Failed to calculate cutoff date for video cleanup")
+            return
+        }
+
+        guard let saveDir = RemFileManager.shared.getSaveDir() else {
+            logger.warning("No save directory available for video cleanup")
+            return
+        }
+
+        do {
+            let files = try fileManager.contentsOfDirectory(at: saveDir, includingPropertiesForKeys: [.creationDateKey])
+            var deletedCount = 0
+
+            for file in files where file.pathExtension == "mp4" {
+                do {
+                    let attrs = try fileManager.attributesOfItem(atPath: file.path)
+                    if let creationDate = attrs[.creationDate] as? Date, creationDate < cutoffDate {
+                        try fileManager.removeItem(at: file)
+                        deletedCount += 1
+                        logger.debug("Deleted old video: \(file.lastPathComponent)")
                     }
+                } catch {
+                    logger.warning("Failed to process video file \(file.lastPathComponent): \(error.localizedDescription)")
                 }
-            } catch {
-                print("Video cleanup error: \(error.localizedDescription)")
             }
+
+            if deletedCount > 0 {
+                logger.info("Video cleanup completed: \(deletedCount) files removed")
+            }
+        } catch {
+            logger.error("Video cleanup error: \(error.localizedDescription)")
         }
     }
 
@@ -2000,7 +2064,7 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
             Task {
                 let request = VNRecognizeTextRequest { request, error in
                     guard let observations = request.results as? [VNRecognizedTextObservation], error == nil else {
-                        print("OCR error: \(error?.localizedDescription ?? "Unknown error")")
+                        self.logger.error("OCR error: \(error?.localizedDescription ?? "Unknown error")")
                         return
                     }
                     
@@ -2046,7 +2110,7 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                 do {
                     try requestHandler.perform([request])
                 } catch {
-                    print("Failed to perform OCR: \(error.localizedDescription)")
+                    self.logger.error("Failed to perform OCR: \(error.localizedDescription)")
                 }
             }
         }
@@ -2115,7 +2179,7 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
         if let chunksFramesIndex = DatabaseManager.shared.getChunksFramesIndex(frameId: index) {
             showTimelineView(with: chunksFramesIndex)
         } else {
-            print("No chunksFramesIndex found for frameId \(index)")
+            logger.warning("No chunksFramesIndex found for frameId \(index)")
         }
     }
     
