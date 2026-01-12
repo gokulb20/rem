@@ -354,8 +354,8 @@ class DataExporter {
         }
         lastHour = hour
 
-        // Extract key content from this capture
-        let keyContent = extractKeyContent(from: ocrText, windowTitle: windowTitle)
+        // Extract intents from this capture (what Gokul DID, not pixels)
+        let keyContent = extractIntents(from: ocrText, windowTitle: windowTitle, app: app)
 
         // Only add to timeline if something meaningful changed
         let titleChanged = windowTitle != nil && windowTitle != lastWindowTitle
@@ -421,40 +421,280 @@ class DataExporter {
         }
     }
 
-    private func extractKeyContent(from text: String, windowTitle: String?) -> [String] {
-        var content: [String] = []
+    // MARK: - Intent-Based Extraction (CEO-approved: surface what Gokul DID, not pixels)
 
-        // Add window title as key content if meaningful
-        if let title = windowTitle, title.count > 5 && title.count < 100 {
-            content.append(title)
+    private func extractIntents(from text: String, windowTitle: String?, app: String) -> [String] {
+        var intents: [String] = []
+
+        // 1. ACTIVE PROJECTS - from IDE/Terminal context
+        if let project = extractActiveProject(windowTitle: windowTitle, app: app, ocrText: text) {
+            intents.append(project)
         }
 
-        // Extract meaningful lines from OCR
-        let lines = text.components(separatedBy: "\n")
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // 2. FILES EDITED - from window titles and OCR patterns
+        let files = extractFilesEdited(windowTitle: windowTitle, ocrText: text)
+        if !files.isEmpty {
+            intents.append("Edited: \(files.prefix(3).joined(separator: ", "))")
+        }
 
-            // Skip noise
-            if trimmed.count < 8 || trimmed.count > 80 { continue }
-            if trimmed.filter({ $0.isLetter }).count < 5 { continue }
+        // 3. SEARCHES PERFORMED - from browser search bars
+        let searches = extractSearches(app: app, ocrText: text)
+        for search in searches.prefix(2) {
+            intents.append("Searched: \(search)")
+        }
 
-            // Keep lines that look like titles/headings
-            let words = trimmed.components(separatedBy: .whitespaces)
-            if words.count >= 3 && words.count <= 12 {
-                // Capitalize check - titles often have capitalized words
-                let capitalizedWords = words.filter { word in
-                    guard let first = word.first else { return false }
-                    return first.isUppercase
+        // 4. KEY ACTIONS - builds, commits, installs
+        let actions = extractKeyActions(ocrText: text)
+        intents.append(contentsOf: actions.prefix(3))
+
+        return intents
+    }
+
+    private func extractActiveProject(windowTitle: String?, app: String, ocrText: String) -> String? {
+        let ideApps = ["Xcode", "Visual Studio Code", "Code", "Cursor", "IntelliJ IDEA", "WebStorm", "PyCharm", "Android Studio"]
+        let terminalApps = ["Terminal", "iTerm2", "iTerm", "Warp", "Alacritty", "kitty"]
+
+        // IDE: Extract project from window title pattern "file.ext - ProjectName - App"
+        if ideApps.contains(where: { app.contains($0) }), let title = windowTitle {
+            let parts = title.components(separatedBy: " - ")
+            if parts.count >= 2 {
+                // Find the project name (usually second to last, before IDE name)
+                let projectPart = parts.count >= 3 ? parts[parts.count - 2] : parts[0]
+                let fileName = parts[0].trimmingCharacters(in: .whitespaces)
+
+                // Clean project name
+                let project = projectPart.trimmingCharacters(in: .whitespaces)
+                if !ideApps.contains(where: { project.contains($0) }) && project.count < 50 {
+                    return "Working on \(project): \(fileName)"
                 }
-                if capitalizedWords.count >= 2 || trimmed.contains(" - ") || trimmed.contains(" | ") {
-                    if content.count < 5 && !content.contains(trimmed) {
-                        content.append(trimmed)
+            }
+        }
+
+        // Terminal: Look for project context in OCR
+        if terminalApps.contains(where: { app.contains($0) }) {
+            // Look for cd commands
+            if let cdMatch = ocrText.range(of: #"cd\s+([~/\w.-]+)"#, options: .regularExpression) {
+                let path = String(ocrText[cdMatch]).replacingOccurrences(of: "cd ", with: "")
+                let projectName = path.components(separatedBy: "/").last ?? path
+                return "Working in: \(projectName)"
+            }
+
+            // Look for xcodebuild
+            if ocrText.contains("xcodebuild") {
+                if let schemeMatch = ocrText.range(of: #"-scheme\s+(\w+)"#, options: .regularExpression) {
+                    let scheme = String(ocrText[schemeMatch]).replacingOccurrences(of: "-scheme ", with: "")
+                    return "Building: \(scheme)"
+                }
+                return "Building Xcode project"
+            }
+
+            // Look for npm/yarn
+            if ocrText.contains("npm run") || ocrText.contains("yarn") {
+                if let runMatch = ocrText.range(of: #"(npm run|yarn)\s+(\w+)"#, options: .regularExpression) {
+                    let script = String(ocrText[runMatch])
+                    return "Running: \(script)"
+                }
+            }
+
+            // Look for Claude Code
+            if ocrText.contains("claude") || ocrText.contains("Claude Code") {
+                return "Using Claude Code"
+            }
+        }
+
+        // Xcode: Extract from window title
+        if app.contains("Xcode"), let title = windowTitle {
+            if title.contains(".xcodeproj") || title.contains(".xcworkspace") {
+                let projectName = title.components(separatedBy: ".xc").first ?? title
+                return "Working on: \(projectName)"
+            }
+            // Xcode file view: "FileName.swift — ProjectName"
+            if title.contains("—") {
+                let parts = title.components(separatedBy: "—")
+                if parts.count >= 2 {
+                    let project = parts[1].trimmingCharacters(in: .whitespaces)
+                    let file = parts[0].trimmingCharacters(in: .whitespaces)
+                    return "Working on \(project): \(file)"
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func extractFilesEdited(windowTitle: String?, ocrText: String) -> [String] {
+        var files: Set<String> = []
+
+        // Common source file extensions
+        let filePattern = #"[\w-]+\.(swift|ts|tsx|js|jsx|py|rs|go|java|kt|cpp|c|h|hpp|css|scss|html|json|yaml|yml|md|sql|rb)"#
+
+        // Extract from window title
+        if let title = windowTitle {
+            if let range = title.range(of: filePattern, options: .regularExpression) {
+                files.insert(String(title[range]))
+            }
+        }
+
+        // Extract from OCR - look for file operation patterns
+        let fileOperationPatterns = [
+            #"(?:Read|Edit|Update|Write|Modified|Created|Deleted)(?:\s+file)?:?\s*([\w/.-]+\.\w+)"#,
+            #"modified:\s*([\w/.-]+\.\w+)"#,
+            #"new file:\s*([\w/.-]+\.\w+)"#,
+            #"renamed:\s*[\w/.-]+\s*->\s*([\w/.-]+\.\w+)"#,
+        ]
+
+        for pattern in fileOperationPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(ocrText.startIndex..., in: ocrText)
+                let matches = regex.matches(in: ocrText, range: range)
+                for match in matches.prefix(5) {
+                    if match.numberOfRanges > 1, let fileRange = Range(match.range(at: 1), in: ocrText) {
+                        let file = String(ocrText[fileRange])
+                        // Just get filename, not full path
+                        let filename = file.components(separatedBy: "/").last ?? file
+                        if filename.count > 2 && filename.count < 60 {
+                            files.insert(filename)
+                        }
                     }
                 }
             }
         }
 
-        return content
+        // Also look for simple file mentions in OCR
+        if let regex = try? NSRegularExpression(pattern: filePattern, options: []) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(10) {
+                if let matchRange = Range(match.range, in: ocrText) {
+                    let file = String(ocrText[matchRange])
+                    if file.count > 2 && file.count < 60 {
+                        files.insert(file)
+                    }
+                }
+            }
+        }
+
+        return Array(files).sorted()
+    }
+
+    private func extractSearches(app: String, ocrText: String) -> [String] {
+        var searches: [String] = []
+        let browserApps = ["Safari", "Google Chrome", "Chrome", "Arc", "Firefox", "Brave", "Edge"]
+
+        guard browserApps.contains(where: { app.contains($0) }) else { return [] }
+
+        // Google search URL pattern
+        let googlePattern = #"google\.com/search\?q=([^&\s]+)"#
+        if let regex = try? NSRegularExpression(pattern: googlePattern, options: []) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(3) {
+                if match.numberOfRanges > 1, let queryRange = Range(match.range(at: 1), in: ocrText) {
+                    let rawQuery = String(ocrText[queryRange]).replacingOccurrences(of: "+", with: " ")
+                    let query = rawQuery.removingPercentEncoding ?? rawQuery
+                    if query.count > 2 && query.count < 100 {
+                        searches.append(query)
+                    }
+                }
+            }
+        }
+
+        // DuckDuckGo pattern
+        let ddgPattern = #"duckduckgo\.com/\?q=([^&\s]+)"#
+        if let regex = try? NSRegularExpression(pattern: ddgPattern, options: []) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(3) {
+                if match.numberOfRanges > 1, let queryRange = Range(match.range(at: 1), in: ocrText) {
+                    let rawQuery = String(ocrText[queryRange]).replacingOccurrences(of: "+", with: " ")
+                    let query = rawQuery.removingPercentEncoding ?? rawQuery
+                    if query.count > 2 && query.count < 100 {
+                        searches.append(query)
+                    }
+                }
+            }
+        }
+
+        // Generic "Search:" pattern in OCR
+        let searchLabelPattern = #"Search:?\s+([^\n]{3,50})"#
+        if let regex = try? NSRegularExpression(pattern: searchLabelPattern, options: .caseInsensitive) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(2) {
+                if match.numberOfRanges > 1, let queryRange = Range(match.range(at: 1), in: ocrText) {
+                    let query = String(ocrText[queryRange]).trimmingCharacters(in: .whitespaces)
+                    if query.count > 2 && !searches.contains(query) {
+                        searches.append(query)
+                    }
+                }
+            }
+        }
+
+        return searches
+    }
+
+    private func extractKeyActions(ocrText: String) -> [String] {
+        var actions: [String] = []
+
+        // Build outcomes
+        if ocrText.contains("Build Succeeded") || ocrText.contains("BUILD SUCCEEDED") {
+            actions.append("Build succeeded")
+        }
+        if ocrText.contains("Build Failed") || ocrText.contains("BUILD FAILED") {
+            actions.append("Build failed")
+        }
+        if let match = ocrText.range(of: #"Compiled \d+ (files?|source files?)"#, options: .regularExpression) {
+            actions.append(String(ocrText[match]))
+        }
+
+        // Git operations
+        if ocrText.contains("git commit") || ocrText.range(of: #"\[[\w-]+\s+[\w\d]+\]"#, options: .regularExpression) != nil {
+            // Try to extract commit message
+            if let msgMatch = ocrText.range(of: #"-m [\"']([^\"']+)[\"']"#, options: .regularExpression) {
+                let msg = String(ocrText[msgMatch])
+                    .replacingOccurrences(of: "-m ", with: "")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                if msg.count < 80 {
+                    actions.append("Committed: \(msg.prefix(50))")
+                }
+            } else {
+                actions.append("Git commit")
+            }
+        }
+        if ocrText.contains("git push") || ocrText.contains("pushed to") {
+            actions.append("Pushed to remote")
+        }
+        if ocrText.contains("git pull") || ocrText.contains("Already up to date") {
+            actions.append("Git pull")
+        }
+
+        // Install operations
+        if ocrText.contains("installed to /Applications") || ocrText.contains("Successfully installed") {
+            actions.append("Installed application")
+        }
+        if ocrText.contains("npm install") || ocrText.contains("yarn add") {
+            actions.append("Installed dependencies")
+        }
+
+        // Test outcomes
+        if ocrText.contains("Tests Passed") || ocrText.contains("All tests passed") {
+            actions.append("Tests passed")
+        }
+        if ocrText.contains("Test Failed") || ocrText.contains("FAILED") && ocrText.contains("test") {
+            actions.append("Tests failed")
+        }
+
+        // Deploy operations
+        if ocrText.contains("deployed to") || ocrText.contains("Deployment successful") {
+            actions.append("Deployed")
+        }
+
+        // Download/upload
+        if ocrText.contains("Download complete") || ocrText.contains("Downloaded") {
+            actions.append("Downloaded file")
+        }
+
+        return actions
     }
 
     // MARK: - Enhanced Analysis
