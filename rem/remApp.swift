@@ -131,6 +131,11 @@ class DataExporter {
             RemLogger.shared.logError(error, context: "DataExporter.init:createDirectory", logger: RemLogger.shared.export)
         }
 
+        // Initialize lastDigestDate to today so first day transition works correctly
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        lastDigestDate = formatter.string(from: Date())
+
         // Pre-compile common browser URL scripts
         precompileBrowserScripts()
     }
@@ -1276,6 +1281,9 @@ class DataExporter {
     // MARK: - Stats Tracking
 
     private func trackStats(app: String?, url: String?, date: String) {
+        dataLock.lock()
+        defer { dataLock.unlock() }
+
         if let appName = app {
             dailyStats[appName, default: 0] += 1
         }
@@ -1287,11 +1295,33 @@ class DataExporter {
     // MARK: - Daily Digest
 
     func generateDigest(for date: String) {
+        // Thread-safe snapshot of stats
+        dataLock.lock()
+        let snapshotStats = dailyStats
+        let snapshotUrls = dailyUrls
+        dailyStats.removeAll()
+        dailyUrls.removeAll()
+        dataLock.unlock()
+
+        // Skip if no data
+        guard !snapshotStats.isEmpty else {
+            logger.info("No stats to generate digest for \(date)")
+            return
+        }
+
         let dayDir = exportBaseDir.appendingPathComponent(date)
+
+        // Ensure directory exists
+        do {
+            try fileManager.createDirectory(at: dayDir, withIntermediateDirectories: true)
+        } catch {
+            logger.error("Failed to create digest directory \(date): \(error.localizedDescription)")
+            return
+        }
 
         // Count files and calculate time (2 sec per capture)
         var appTimes: [String: [String: Any]] = [:]
-        for (app, count) in dailyStats {
+        for (app, count) in snapshotStats {
             appTimes[app] = [
                 "captures": count,
                 "minutes": count * 2 / 60  // 2 seconds per capture
@@ -1299,11 +1329,11 @@ class DataExporter {
         }
 
         // Top URLs
-        let topUrls = dailyUrls.sorted { $0.value > $1.value }.prefix(20).map { ["url": $0.key, "visits": $0.value] }
+        let topUrls = snapshotUrls.sorted { $0.value > $1.value }.prefix(20).map { ["url": $0.key, "visits": $0.value] }
 
         let digest: [String: Any] = [
             "date": date,
-            "total_captures": dailyStats.values.reduce(0, +),
+            "total_captures": snapshotStats.values.reduce(0, +),
             "apps": appTimes,
             "top_urls": topUrls
         ]
@@ -1317,23 +1347,14 @@ class DataExporter {
         } catch {
             logger.error("Failed to save digest for \(date): \(error.localizedDescription)")
         }
-
-        // Reset stats for new day
-        dailyStats.removeAll()
-        dailyUrls.removeAll()
     }
 
     // MARK: - Cleanup
 
     func performCleanup() {
         cleanupOldVideos()
-        // Generate digest for today if needed
-        let today = DateFormatter()
-        today.dateFormat = "yyyy-MM-dd"
-        let todayStr = today.string(from: Date())
-        if !dailyStats.isEmpty {
-            generateDigest(for: todayStr)
-        }
+        // Note: Digests are generated on day transitions in exportCapture(),
+        // not during cleanup. This prevents mid-day stats from being cleared.
     }
 
     private func cleanupOldVideos() {
