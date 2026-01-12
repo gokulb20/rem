@@ -387,7 +387,16 @@ class DataExporter {
         }
 
         // Track URL visits and domains
+        // Use AppleScript URL if available, otherwise extract from OCR
+        let urlsToTrack: [String]
         if let urlStr = url {
+            urlsToTrack = [urlStr]
+        } else {
+            // Fallback: extract URLs from OCR text (AppleScript often fails due to permissions)
+            urlsToTrack = extractUrlsFromOCR(ocrText)
+        }
+
+        for urlStr in urlsToTrack {
             hourlyUrls.insert(urlStr)
             if var existing = dailyUrlVisits[urlStr] {
                 existing.count += 1
@@ -695,6 +704,56 @@ class DataExporter {
         }
 
         return actions
+    }
+
+    /// Extract URLs from OCR text as fallback when AppleScript fails (permission issues)
+    /// Looks for: full URLs, search URLs with queries, common domains
+    private func extractUrlsFromOCR(_ ocrText: String) -> [String] {
+        var urls: Set<String> = []
+
+        // Full URL pattern (https:// or http://)
+        let fullUrlPattern = #"https?://[^\s\"\'\<\>\)\]\}]+"#
+        if let regex = try? NSRegularExpression(pattern: fullUrlPattern, options: []) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(10) {
+                if let matchRange = Range(match.range, in: ocrText) {
+                    var url = String(ocrText[matchRange])
+                    // Clean trailing punctuation
+                    while url.hasSuffix(".") || url.hasSuffix(",") || url.hasSuffix(":") {
+                        url = String(url.dropLast())
+                    }
+                    if url.count > 10 && url.count < 500 {
+                        urls.insert(url)
+                    }
+                }
+            }
+        }
+
+        // Domain patterns commonly seen in browser OCR (without protocol)
+        // These often appear in Safari's address bar
+        let domainPattern = #"(?:^|\s)((?:[\w-]+\.)+(?:com|org|net|io|dev|ai|co|app|me|tv|edu|gov|uk|de|fr|jp|cn|in|ru|br|au)(?:/[^\s]*)?)"#
+        if let regex = try? NSRegularExpression(pattern: domainPattern, options: .caseInsensitive) {
+            let range = NSRange(ocrText.startIndex..., in: ocrText)
+            let matches = regex.matches(in: ocrText, range: range)
+            for match in matches.prefix(5) {
+                if match.numberOfRanges > 1, let domainRange = Range(match.range(at: 1), in: ocrText) {
+                    var domain = String(ocrText[domainRange])
+                    // Clean trailing punctuation
+                    while domain.hasSuffix(".") || domain.hasSuffix(",") {
+                        domain = String(domain.dropLast())
+                    }
+                    // Skip common false positives
+                    let skipPatterns = ["e.g.", "i.e.", "etc.", "vs.", "min.", "max."]
+                    if !skipPatterns.contains(where: { domain.lowercased().contains($0) }) &&
+                       domain.count > 5 && domain.count < 200 {
+                        urls.insert("https://\(domain)")
+                    }
+                }
+            }
+        }
+
+        return Array(urls).sorted()
     }
 
     // MARK: - Enhanced Analysis
