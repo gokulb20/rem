@@ -12,11 +12,9 @@ import LaunchAtLogin
 // The settings structure
 struct AppSettings: Codable {
     var saveEverythingCopiedToClipboard: Bool
-    var enableCmdScrollShortcut: Bool
     var onlyOCRFrontmostWindow: Bool = true
     var fastOCR: Bool = true
     var startRememberingOnStartup: Bool = true  // Always on by default
-    var recordWindowWithMouse: Bool = false
 }
 
 // The settings manager handles saving and loading the settings
@@ -33,7 +31,7 @@ class SettingsManager: ObservableObject {
             self.settings = decodedSettings
         } else {
             // Default settings
-            self.settings = AppSettings(saveEverythingCopiedToClipboard: false, enableCmdScrollShortcut: true)
+            self.settings = AppSettings(saveEverythingCopiedToClipboard: false)
         }
     }
 

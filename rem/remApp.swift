@@ -782,10 +782,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     )
 
     // Event monitors - stored so we can remove them later to prevent memory leaks
-    private var globalScrollMonitor: Any?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
-    private var localScrollMonitor: Any?
 
     // Screenshot scheduling - track work item for proper cancellation
     private var screenshotWorkItem: DispatchWorkItem?
@@ -805,11 +803,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup Menu
         setupMenu()
         
-        // Monitor for scroll events - store reference for cleanup
-        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            self?.handleGlobalScrollEvent(event)
-        }
-
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if (self?.searchViewWindow?.isVisible ?? false) && event.keyCode == 53 {
                 DispatchQueue.main.async { [weak self] in
@@ -846,21 +839,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            if self?.isTimelineOpen() ?? false {
-                if !event.modifierFlags.contains(.command) && event.scrollingDeltaX != 0 {
-                    self?.timelineView?.viewModel.updateIndex(withDelta: event.scrollingDeltaX)
-                }
-
-                if event.modifierFlags.contains(.command) && event.scrollingDeltaY > 0 && (self?.isTimelineOpen() ?? false) { // Check if scroll up
-                    DispatchQueue.main.async { [weak self] in
-                        self?.closeTimelineView()
-                    }
-                }
-            }
-            return event
-        }
-        
         // Initialize the search view
         searchView = SearchView(onThumbnailClick: openFullView)
         observeSystemNotifications()
@@ -1007,17 +985,6 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
         }
     }
     
-    private func handleGlobalScrollEvent(_ event: NSEvent) {
-        guard settingsManager.settings.enableCmdScrollShortcut else { return }
-        guard event.modifierFlags.contains(.command) else { return }
-        
-        if event.scrollingDeltaY < 0 && !isTimelineOpen() { // Check if scroll up
-            DispatchQueue.main.async { [weak self] in
-                self?.showTimelineView(with: DatabaseManager.shared.getMaxChunksFramesIndex())
-            }
-        }
-    }
-
     @objc func togglePopover(_ sender: AnyObject?) {
         if let button = statusBarItem.button {
             if popover.isShown {
@@ -1102,21 +1069,9 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
                     return }
                 
                 var displayID: CGDirectDisplayID? = nil
-                if settingsManager.settings.recordWindowWithMouse {
-                    let mouseLocation = NSEvent.mouseLocation
-                    if let screen = NSScreen.screens.first(where: {$0.frame.contains(mouseLocation)}) {
-                        if let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-                            displayID = CGDirectDisplayID(screenID.uint32Value)
-                            logger.debug("Mouse Active Display ID: \(displayID ?? 999)")
-                        }
-                    }
-                }
-                
-                if displayID == nil {
-                    if let screenID = NSScreen.main?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-                        displayID = CGDirectDisplayID(screenID.uint32Value)
-                        logger.debug("Active Display ID: \(displayID ?? 999)")
-                    }
+                if let screenID = NSScreen.main?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                    displayID = CGDirectDisplayID(screenID.uint32Value)
+                    logger.debug("Active Display ID: \(displayID ?? 999)")
                 }
                 
                 guard displayID != nil else {
@@ -1420,10 +1375,6 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
     }
 
     private func cleanupEventMonitors() {
-        if let monitor = globalScrollMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalScrollMonitor = nil
-        }
         if let monitor = globalKeyMonitor {
             NSEvent.removeMonitor(monitor)
             globalKeyMonitor = nil
@@ -1431,10 +1382,6 @@ func drawStatusBarIcon(rect: CGRect) -> Bool {
         if let monitor = localKeyMonitor {
             NSEvent.removeMonitor(monitor)
             localKeyMonitor = nil
-        }
-        if let monitor = localScrollMonitor {
-            NSEvent.removeMonitor(monitor)
-            localScrollMonitor = nil
         }
     }
 

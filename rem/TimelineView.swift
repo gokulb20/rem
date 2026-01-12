@@ -289,12 +289,6 @@ class CustomInterceptingView: NSView {
         }
     }
     
-    override func scrollWheel(with event: NSEvent) {
-        guard settingsManager?.settings.enableCmdScrollShortcut ?? false else { return }
-        if event.modifierFlags.contains(.command) && event.scrollingDeltaY > 0 {
-            self.exit()
-        }
-    }
 }
 
 class TimelineViewModel: ObservableObject {
