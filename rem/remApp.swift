@@ -121,7 +121,7 @@ class DataExporter {
 
     init() {
         let homeDir = fileManager.homeDirectoryForCurrentUser
-        exportBaseDir = homeDir.appendingPathComponent("rem-data")
+        exportBaseDir = homeDir.appendingPathComponent("punk-records-data")
 
         // Create export directory with proper error handling
         do {

@@ -1,92 +1,47 @@
-# Rem
+# Punk Records
 
-**Rem** is a macOS application that continuously captures your screen activity, performs OCR (Optical Character Recognition) on screenshots, and creates a searchable timeline of everything you've seen on your computer.
+Your screen, recorded. Your context, shared with Claude. Stop explaining what you were just doing—Claude already knows.
 
-## Features
+## What It Does
 
-- **Continuous Screen Capture**: Automatically records your screen at regular intervals
-- **OCR Text Extraction**: Extracts readable text from screenshots using Apple's Vision framework
-- **Full-Text Search**: Search through everything you've seen with SQLite FTS4
-- **Timeline Visualization**: Browse through your screen history with video playback
-- **Activity Tracking**: Generates hourly and daily summaries of your computer usage
-- **URL & Project Detection**: Automatically extracts URLs from browser sessions and detects active projects
-- **Privacy-First Design**: All data stays local on your machine
-- **Sensitive Content Filtering**: Automatically detects and filters passwords, API keys, and other sensitive data from clipboard
+Punk Records captures your screen every few seconds, runs OCR, and exports structured context to a folder Claude Desktop can read. **Hourly summaries. Daily digests. Intent extraction.** Not raw screenshots, but what you were actually doing.
+
+## Who It's For
+
+People who live in Claude and are tired of re-explaining their work context every conversation. Developers, founders, power users who want Claude to just **know** what's going on. This is a tool for maybe 500 people on earth. You might be one of them.
 
 ## Requirements
 
+- Mac (Apple Silicon)
 - macOS 13.0 (Ventura) or later
-- Xcode 15.0 or later (for building)
-- Screen Recording permission
-- Accessibility permission (for window titles)
+- Claude Desktop with filesystem MCP connector
+- Comfort with your AI seeing everything you do
 
 ## Installation
 
-### From Source
+1. Download from [Releases](https://github.com/punkrecords/punk-records/releases)
+2. Drag to Applications
+3. Grant Screen Recording and Accessibility permissions when prompted
+4. Configure Claude Desktop to read from `~/punk-records-data/`
 
-1. Clone the repository:
-   ```bash
-   git clone --recursive https://github.com/jasonjmcghee/rem.git
-   cd rem
-   ```
+## Privacy
 
-2. Build FFmpeg (required for video encoding):
-   ```bash
-   ./scripts/build_ffmpeg.sh
-   ```
+**100% local.** Nothing leaves your machine. No cloud, no analytics, no telemetry. The data lives in a folder on your Mac. You own it. Delete it whenever you want.
 
-3. Open in Xcode:
-   ```bash
-   open rem.xcodeproj
-   ```
+## Data Storage
 
-4. Build and run (⌘R)
-
-### Pre-built Release
-
-Download the latest release from the [Releases](https://github.com/jasonjmcghee/rem/releases) page.
-
-## Usage
-
-### Getting Started
-
-1. Launch Rem from your Applications folder
-2. Grant the required permissions when prompted:
-   - **Screen Recording**: Required for capturing screen content
-   - **Accessibility**: Required for extracting window titles
-3. Rem will automatically start recording in the background
-4. Access Rem from the menu bar icon
-
-### Menu Bar Controls
-
-- Click the Rem icon to access settings
-- **Recording indicator**: Green = recording, Gray = stopped
-- **Settings**: Configure recording preferences
-- **Show Data Folder**: Open the folder where data is stored
-- **Purge All Data**: Delete all captured data (irreversible)
-
-### Keyboard Shortcuts
-
-- `⌘⇧F` - Open search view
-- `Esc` - Close timeline or search view
-
-### Data Storage
-
-Rem stores data in two locations:
-
-1. **Database & Videos**: `~/Library/Application Support/today.jason.rem/`
+1. **Database & Videos**: `~/Library/Application Support/punk.records/`
    - `db.sqlite3` - SQLite database with OCR text and metadata
-   - `output-*.mp4` - Video chunks (automatically cleaned after 1 hour)
+   - `output-*.mp4` - Video chunks (auto-cleaned after 1 hour)
 
-2. **Exports for Claude/AI**: `~/rem-data/`
+2. **Exports for Claude**: `~/punk-records-data/`
    - Daily folders organized as `YYYY-MM-DD/`
    - Individual captures as `.md` files with YAML frontmatter
-   - Hourly summaries (`hour-XX-summary.json`) and daily journals
-   - Perfect for AI assistant integration via filesystem connector
+   - Hourly summaries and daily journals as JSON
 
-### Export Format
+## Export Format
 
-Individual captures are exported as Markdown with YAML frontmatter:
+Individual captures are exported as Markdown:
 
 ```markdown
 ---
@@ -103,186 +58,39 @@ youtube.com
 ...OCR text content here...
 ```
 
-Summaries remain as JSON for structured aggregation.
-
-## Architecture
-
-```
-rem/
-├── remApp.swift          # Main app entry point & DataExporter
-├── DB.swift              # SQLite database with FTS4 search
-├── TimelineView.swift    # Video playback & timeline UI
-├── Search.swift          # Full-text search interface
-├── ClipboardManager.swift # Clipboard monitoring
-├── TextMerger.swift      # OCR text deduplication
-├── SettingsManager.swift # User preferences
-├── Logger.swift          # Production logging infrastructure
-└── ImageHelper.swift     # Image processing utilities
-```
-
-### Key Components
-
-| Component | Purpose |
-|-----------|---------|
-| `DataExporter` | Exports captures to JSON, generates summaries |
-| `DatabaseManager` | SQLite operations, FTS4 search, video chunk management |
-| `AppDelegate` | Screen capture loop, OCR processing, event handling |
-| `RemLogger` | Centralized logging with os.Logger |
-| `SensitiveContentFilter` | Filters passwords, API keys from stored data |
+Hourly and daily summaries remain JSON for structured aggregation.
 
 ## Configuration
 
-### Settings (via UI)
+Access settings via the menu bar icon:
 
-- **Launch at startup**: Auto-start Rem when you log in
+- **Launch at startup**: Auto-start when you log in
 - **Include clipboard text**: Save copied text with screenshots
 - **Fast OCR mode**: Trade accuracy for speed
 - **OCR active window only**: Only process the focused window
 
-### Internal Configuration
+## Keyboard Shortcuts
 
-These values are in the source code and can be modified:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `sessionTimeoutSeconds` | 300 (5 min) | Gap before new session starts |
-| `videoRetentionHours` | 1 | Hours before video cleanup |
-| `frameThreshold` | 30 | Frames per video chunk |
-| `maxBufferSize` | 100 | Max frames in memory buffer |
-| `candidateConfidenceThreshold` | 0.35 | Minimum OCR confidence |
-
-## Development
-
-### Building
-
-```bash
-# Clone with submodules
-git clone --recursive https://github.com/jasonjmcghee/rem.git
-cd rem
-
-# Build FFmpeg
-./scripts/build_ffmpeg.sh
-
-# Open in Xcode
-open rem.xcodeproj
-```
-
-### Running Tests
-
-```bash
-# Via Xcode
-xcodebuild test -project rem.xcodeproj -scheme rem -destination 'platform=macOS'
-
-# Or use ⌘U in Xcode
-```
-
-### Code Quality
-
-```bash
-# Install SwiftLint
-brew install swiftlint
-
-# Run linter
-swiftlint lint
-```
-
-### CI/CD
-
-This project uses GitHub Actions for continuous integration:
-
-- **Build & Test**: Runs on every push and PR
-- **Lint**: SwiftLint code quality checks
-- **Security Scan**: Checks for hardcoded secrets
-- **Release Build**: Creates artifacts for releases
-
-## Security & Privacy
-
-### Data Protection
-
-- All data is stored locally (never uploaded)
-- App Sandbox enabled for security isolation
-- SQL injection protection via parameterized queries
-- FTS search input sanitization
-
-### Sensitive Content Filtering
-
-Rem automatically detects and filters:
-- Passwords and authentication tokens
-- API keys (AWS, OpenAI, etc.)
-- Credit card numbers
-- Social Security Numbers
-- JWT tokens
-
-### Recommendations
-
-For maximum security:
-- Enable FileVault disk encryption on your Mac
-- Regularly review and purge old data
-- Be cautious with the "Include clipboard text" option
+- `Cmd+Shift+F` - Open search view
+- `Esc` - Close timeline or search view
 
 ## Troubleshooting
 
-### Common Issues
-
 **"Screen Recording permission denied"**
-- Go to System Preferences → Privacy & Security → Screen Recording
-- Enable Rem in the list
-- Restart the app
+- System Settings → Privacy & Security → Screen Recording
+- Enable Punk Records, then restart the app
 
 **"No data appearing"**
-- Check that recording is enabled (green indicator)
+- Check recording is enabled (green indicator in menu bar)
 - Verify permissions are granted
-- Check `~/Library/Application Support/today.jason.rem/` for data
-
-**"Search not finding results"**
-- OCR may not have captured the text clearly
-- Try searching for partial words
-- Check that the timeframe is correct
-
-### Logs
-
-View logs using Console.app:
-1. Open Console.app
-2. Filter by "today.jason.rem"
-3. Select your device
-
-Or via terminal:
-```bash
-log show --predicate 'subsystem == "today.jason.rem"' --last 1h
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run tests (`xcodebuild test`)
-5. Commit (`git commit -m 'Add amazing feature'`)
-6. Push (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-### Code Style
-
-- Follow Swift API Design Guidelines
-- Use SwiftLint for consistency
-- Add tests for new functionality
-- Update documentation as needed
+- Check `~/Library/Application Support/punk.records/` for data
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [SQLite.swift](https://github.com/stephencelis/SQLite.swift) - SQLite wrapper
-- [FFmpeg](https://ffmpeg.org/) - Video encoding
-- Apple Vision framework - OCR capabilities
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/jasonjmcghee/rem/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/jasonjmcghee/rem/discussions)
+Proprietary. All rights reserved.
 
 ---
 
-Made with care by [Jason McGhee](https://github.com/jasonjmcghee)
+Built by [Useful Ventures](https://useful.ventures)
+
+Named after the thing from One Piece, obviously. 🏴‍☠️

@@ -1,9 +1,8 @@
 //
 //  DatabaseEncryption.swift
-//  rem
+//  Punk Records
 //
 //  Database encryption support using Keychain for key storage
-//  Production-ready encryption infrastructure
 //
 
 import Foundation
@@ -18,7 +17,7 @@ final class DatabaseEncryptionManager {
     static let shared = DatabaseEncryptionManager()
 
     private let logger = RemLogger.shared.database
-    private let serviceName = "today.jason.rem"
+    private let serviceName = "punk.records"
     private let accountName = "database-encryption-key"
 
     // Key length for AES-256
