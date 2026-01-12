@@ -38,6 +38,8 @@ struct HourlySummary: Codable {
     let urlsVisited: [String]           // All URLs this hour
     let appsUsed: [String: Int]         // app -> minutes
     let keyTopics: [String]             // Extracted topics/titles
+    let workingSummary: String          // "What was I working on" blurb
+    let domains: [String: Int]          // Domain -> visit count
 }
 
 // Daily journal for end-of-day recall
@@ -47,6 +49,9 @@ struct DailyJournal: Codable {
     let allUrls: [URLVisit]             // Every URL with context
     let appSummary: [String: Int]       // Time per app in minutes
     let keyMoments: [String]            // Notable things you saw
+    let daySummary: String              // "What did I do today" blurb
+    let topDomains: [String: Int]       // Most visited domains
+    let projectsWorkedOn: [String]      // Detected project/repo names
 }
 
 struct URLVisit: Codable {
@@ -94,6 +99,11 @@ class DataExporter {
     private var dailyTimeline: [ActivityEntry] = []
     private var dailyUrlVisits: [String: (title: String?, firstSeen: String, count: Int)] = [:]
     private var dailyKeyMoments: [String] = []
+    private var dailyProjects: Set<String> = []
+
+    // Domain tracking
+    private var hourlyDomains: [String: Int] = [:]
+    private var dailyDomains: [String: Int] = [:]
 
     // Thread synchronization for hourly/daily data
     private let dataLock = NSLock()
@@ -320,6 +330,7 @@ class DataExporter {
             let snapshotUrls = hourlyUrls
             let snapshotStats = hourlyStats
             let snapshotTopics = hourlyTopics
+            let snapshotDomains = hourlyDomains
             let previousHour = lastHour
 
             // Reset hourly tracking immediately
@@ -327,6 +338,7 @@ class DataExporter {
             hourlyUrls.removeAll()
             hourlyStats.removeAll()
             hourlyTopics.removeAll()
+            hourlyDomains.removeAll()
 
             // Generate summary async with snapshot data (doesn't block captures)
             DispatchQueue.global(qos: .background).async { [weak self] in
@@ -374,7 +386,7 @@ class DataExporter {
             lastWindowTitle = title
         }
 
-        // Track URL visits
+        // Track URL visits and domains
         if let urlStr = url {
             hourlyUrls.insert(urlStr)
             if var existing = dailyUrlVisits[urlStr] {
@@ -382,6 +394,12 @@ class DataExporter {
                 dailyUrlVisits[urlStr] = existing
             } else {
                 dailyUrlVisits[urlStr] = (title: windowTitle, firstSeen: timeStr, count: 1)
+            }
+
+            // Track domain for aggregated view
+            if let domain = extractDomain(from: urlStr) {
+                hourlyDomains[domain, default: 0] += 1
+                dailyDomains[domain, default: 0] += 1
             }
         }
 
@@ -391,6 +409,15 @@ class DataExporter {
         // Track topics
         for content in keyContent {
             hourlyTopics.insert(content)
+        }
+
+        // Track projects from window titles and URLs
+        let detectedProjects = extractProjects(
+            from: [windowTitle],
+            urls: url != nil ? [url!] : []
+        )
+        for project in detectedProjects {
+            dailyProjects.insert(project)
         }
     }
 
@@ -430,6 +457,150 @@ class DataExporter {
         return content
     }
 
+    // MARK: - Enhanced Analysis
+
+    private func extractDomain(from url: String) -> String? {
+        guard let urlObj = URL(string: url),
+              let host = urlObj.host else { return nil }
+        // Remove www. prefix for cleaner grouping
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    private func extractProjects(from windowTitles: [String?], urls: [String]) -> [String] {
+        var projects: Set<String> = []
+
+        // Extract from window titles (look for common patterns)
+        for title in windowTitles.compactMap({ $0 }) {
+            // Git repo pattern: "folder - app" or "repo/file"
+            if title.contains("/") {
+                let parts = title.components(separatedBy: "/")
+                if let first = parts.first, first.count > 2 && first.count < 30 {
+                    let cleaned = first.trimmingCharacters(in: .whitespaces)
+                    if !cleaned.contains(" ") || cleaned.contains("-") {
+                        projects.insert(cleaned)
+                    }
+                }
+            }
+
+            // VS Code / IDE pattern: "filename - ProjectName"
+            if title.contains(" - ") {
+                let parts = title.components(separatedBy: " - ")
+                if parts.count >= 2 {
+                    let projectPart = parts.last ?? ""
+                    // Filter out app names
+                    let appNames = ["Visual Studio Code", "Xcode", "Cursor", "IntelliJ", "WebStorm", "PyCharm"]
+                    if !appNames.contains(where: { projectPart.contains($0) }) && projectPart.count < 40 {
+                        projects.insert(projectPart.trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+        }
+
+        // Extract from GitHub/GitLab URLs
+        for url in urls {
+            if url.contains("github.com") || url.contains("gitlab.com") {
+                if let urlObj = URL(string: url) {
+                    let pathParts = urlObj.path.components(separatedBy: "/").filter { !$0.isEmpty }
+                    if pathParts.count >= 2 {
+                        projects.insert("\(pathParts[0])/\(pathParts[1])")
+                    }
+                }
+            }
+        }
+
+        return Array(projects).sorted()
+    }
+
+    private func generateWorkingSummary(apps: [String: Int], topics: [String], urls: [String]) -> String {
+        var parts: [String] = []
+
+        // Top apps by time
+        let topApps = apps.sorted { $0.value > $1.value }.prefix(3)
+        if !topApps.isEmpty {
+            let appList = topApps.map { "\($0.key) (\($0.value) min)" }.joined(separator: ", ")
+            parts.append("Used \(appList)")
+        }
+
+        // Categorize activity
+        let browserApps = ["Safari", "Google Chrome", "Arc", "Firefox", "Brave Browser"]
+        let devApps = ["Xcode", "Visual Studio Code", "Cursor", "Terminal", "iTerm2", "IntelliJ IDEA"]
+        let commApps = ["Slack", "Discord", "Messages", "Mail", "Microsoft Teams", "Zoom"]
+
+        let browserTime = apps.filter { browserApps.contains($0.key) }.values.reduce(0, +)
+        let devTime = apps.filter { devApps.contains($0.key) }.values.reduce(0, +)
+        let commTime = apps.filter { commApps.contains($0.key) }.values.reduce(0, +)
+
+        if devTime > 10 {
+            parts.append("coding/development")
+        }
+        if browserTime > 10 {
+            parts.append("browsing/research")
+        }
+        if commTime > 5 {
+            parts.append("communication")
+        }
+
+        // Add key topics
+        let relevantTopics = topics.prefix(3)
+        if !relevantTopics.isEmpty {
+            parts.append("Topics: \(relevantTopics.joined(separator: ", "))")
+        }
+
+        // Domain summary
+        let domains = urls.compactMap { extractDomain(from: $0) }
+        let domainCounts = Dictionary(grouping: domains, by: { $0 }).mapValues { $0.count }
+        let topDomains = domainCounts.sorted { $0.value > $1.value }.prefix(3)
+        if !topDomains.isEmpty {
+            let domainList = topDomains.map { $0.key }.joined(separator: ", ")
+            parts.append("Sites: \(domainList)")
+        }
+
+        return parts.isEmpty ? "Light activity" : parts.joined(separator: ". ")
+    }
+
+    private func generateDaySummary(apps: [String: Int], urls: [URLVisit], projects: [String], moments: [String]) -> String {
+        var parts: [String] = []
+
+        // Total active time
+        let totalMinutes = apps.values.reduce(0, +)
+        let hours = totalMinutes / 60
+        let mins = totalMinutes % 60
+        if hours > 0 {
+            parts.append("Active for \(hours)h \(mins)m")
+        } else if mins > 0 {
+            parts.append("Active for \(mins) minutes")
+        }
+
+        // Main activities
+        let topApps = apps.sorted { $0.value > $1.value }.prefix(3)
+        if !topApps.isEmpty {
+            let appList = topApps.map { $0.key }.joined(separator: ", ")
+            parts.append("mainly in \(appList)")
+        }
+
+        // Projects
+        if !projects.isEmpty {
+            let projectList = projects.prefix(3).joined(separator: ", ")
+            parts.append("Worked on: \(projectList)")
+        }
+
+        // Top sites
+        let topUrls = urls.prefix(3)
+        if !topUrls.isEmpty {
+            let sites = topUrls.compactMap { extractDomain(from: $0.url) }.joined(separator: ", ")
+            if !sites.isEmpty {
+                parts.append("Visited: \(sites)")
+            }
+        }
+
+        // Key moments
+        if !moments.isEmpty {
+            parts.append("Notable: \(moments.prefix(2).joined(separator: "; "))")
+        }
+
+        return parts.isEmpty ? "No significant activity recorded" : parts.joined(separator: ". ")
+    }
+
     // MARK: - Summary Generation (Thread-Safe)
 
     private func generateHourlySummaryFromSnapshot(
@@ -454,13 +625,31 @@ class DataExporter {
             return minutes > 0 ? minutes : (seconds > 0 ? 1 : 0)
         }
 
+        // Calculate domain visits
+        let urlArray = Array(urls)
+        var domainCounts: [String: Int] = [:]
+        for url in urlArray {
+            if let domain = extractDomain(from: url) {
+                domainCounts[domain, default: 0] += 1
+            }
+        }
+
+        // Generate working summary
+        let workingSummary = generateWorkingSummary(
+            apps: appsUsedMinutes,
+            topics: Array(topics),
+            urls: urlArray
+        )
+
         let summary = HourlySummary(
             hour: hourStr,
             date: dayFolder,
             timeline: timeline,
-            urlsVisited: Array(urls),
+            urlsVisited: urlArray,
             appsUsed: appsUsedMinutes,
-            keyTopics: Array(topics.prefix(30))
+            keyTopics: Array(topics.prefix(30)),
+            workingSummary: workingSummary,
+            domains: domainCounts
         )
 
         let filename = "hour-\(String(format: "%02d", hour))-summary.json"
@@ -492,11 +681,15 @@ class DataExporter {
         let snapshotUrlVisits = dailyUrlVisits
         let snapshotKeyMoments = dailyKeyMoments
         let snapshotStats = dailyStats
+        let snapshotProjects = Array(dailyProjects)
+        let snapshotDomains = dailyDomains
 
         // Reset daily tracking immediately
         dailyTimeline.removeAll()
         dailyUrlVisits.removeAll()
         dailyKeyMoments.removeAll()
+        dailyProjects.removeAll()
+        dailyDomains.removeAll()
         dataLock.unlock()
 
         let dayDir = exportBaseDir.appendingPathComponent(date)
@@ -514,12 +707,28 @@ class DataExporter {
             return minutes > 0 ? minutes : (seconds > 0 ? 1 : 0)
         }
 
+        // Generate day summary blurb
+        let daySummary = generateDaySummary(
+            apps: appSummaryMinutes,
+            urls: urlVisits,
+            projects: snapshotProjects,
+            moments: snapshotKeyMoments
+        )
+
+        // Top domains sorted by visit count
+        let topDomains = snapshotDomains.sorted { $0.value > $1.value }
+            .prefix(10)
+            .reduce(into: [String: Int]()) { $0[$1.key] = $1.value }
+
         let journal = DailyJournal(
             date: date,
             timeline: snapshotTimeline,
             allUrls: urlVisits,
             appSummary: appSummaryMinutes,
-            keyMoments: snapshotKeyMoments
+            keyMoments: snapshotKeyMoments,
+            daySummary: daySummary,
+            topDomains: topDomains,
+            projectsWorkedOn: snapshotProjects
         )
 
         let filename = "\(date)-journal.json"
